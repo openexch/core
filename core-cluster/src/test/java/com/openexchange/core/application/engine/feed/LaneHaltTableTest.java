@@ -396,7 +396,7 @@ public class LaneHaltTableTest {
         assertEquals(2L, restored.feed().laneHaltIdentity(0));
         assertEquals(9L, restored.feed().laneHaltSeen(1));
         assertEquals(FeedState.HOLDER_GAP, restored.feed().holders());
-        assertEquals("layout v5 tag", BalanceSnapshotCodec.LAYOUT_V5_TAG, new UnsafeBuffer(ia).getLong(0));
+        assertEquals("layout v6 tag", BalanceSnapshotCodec.LAYOUT_V6_TAG, new UnsafeBuffer(ia).getLong(0));
     }
 
     @Test
@@ -469,23 +469,36 @@ public class LaneHaltTableTest {
         // a v4 tag
         final byte[] v4 = good.clone();
         new UnsafeBuffer(v4).putLong(0, BalanceSnapshotCodec.LAYOUT_V4_TAG);
-        assertRefused(v4, "reads only v5");
+        assertRefused(v4, "reads only v6");
+        // and the v5 tag (the layout before the limits record and the event ring)
+        final byte[] v5 = good.clone();
+        new UnsafeBuffer(v5).putLong(0, BalanceSnapshotCodec.LAYOUT_V5_TAG);
+        assertRefused(v5, "reads only v6");
     }
 
     @Test
     public void sectionTwelveIsMandatoryUnderVThreeAndRefusedBelow() {
         final byte[] img = image(book());
         final int[] s = section(img, BalanceSnapshotCodec.SECTION_FEED_HALTS);
-        final byte[] cut = java.util.Arrays.copyOf(img, s[0] - 6); // section 12 is the last one
+        // section 12 is cut out; the limits record (13) and the event ring (14) that follow it stay
+        final int after = section(img, BalanceSnapshotCodec.SECTION_LIMITS)[0] - 6;
+        final byte[] cut = new byte[img.length - (after - (s[0] - 6))];
+        System.arraycopy(img, 0, cut, 0, s[0] - 6);
+        System.arraycopy(img, after, cut, s[0] - 6, img.length - after);
         final UnsafeBuffer c = new UnsafeBuffer(cut);
         c.putInt(8 + 7 * 8 + 1, c.getInt(8 + 7 * 8 + 1) - 1);
         assertRefused(cut, "no FEED_HALTS section (12)");
         final byte[] v2 = image(V3Rig.v2());
-        final byte[] longer = java.util.Arrays.copyOf(v2, v2.length + 6 + FeedState.HALT_SECTION_HEAD_BYTES);
+        // a section 12 spliced into a behaviour 2 image, in id order: before the limits record
+        final int at = section(v2, BalanceSnapshotCodec.SECTION_LIMITS)[0] - 6;
+        final int extra = 6 + FeedState.HALT_SECTION_HEAD_BYTES;
+        final byte[] longer = new byte[v2.length + extra];
+        System.arraycopy(v2, 0, longer, 0, at);
+        System.arraycopy(v2, at, longer, at + extra, v2.length - at);
         final UnsafeBuffer b = new UnsafeBuffer(longer);
-        b.putShort(v2.length, BalanceSnapshotCodec.SECTION_FEED_HALTS);
-        b.putInt(v2.length + 2, FeedState.HALT_SECTION_HEAD_BYTES);
-        b.putByte(v2.length + 6, (byte) 1);
+        b.putShort(at, BalanceSnapshotCodec.SECTION_FEED_HALTS);
+        b.putInt(at + 2, FeedState.HALT_SECTION_HEAD_BYTES);
+        b.putByte(at + 6, (byte) 1);
         b.putInt(8 + 7 * 8 + 1, b.getInt(8 + 7 * 8 + 1) + 1);
         assertRefused(longer, "below behaviour 3 carries a FEED_HALTS section (12)");
     }

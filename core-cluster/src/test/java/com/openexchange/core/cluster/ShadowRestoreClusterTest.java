@@ -179,6 +179,85 @@ public class ShadowRestoreClusterTest {
         }
     }
 
+    /**
+     * The event ring and the limits record on every restore path. Before the snapshot an ADMIN limits record shrinks the
+     * ring to {@link ShadowClusterRig#SMALL_EVENT_RING} and twenty accepted creates wrap it. Then, as in the row above,
+     * the follower restarts through TAIL (the tail applies frames behind the leader gate and emits nothing, and must
+     * still fill the ring), SKIP and EQUAL, and after each restart the replay reply and the config report it emits are
+     * byte-equal to the leader's, which never restarted. A second follower restarts last from its own stub with no
+     * shadow below it removed: the full path through the retained log.
+     */
+    @Test
+    public void aWrappedEventRingAndTheLimitsRecordSurviveEveryRestorePath() throws Exception {
+        try (ShadowClusterRig rig = new ShadowClusterRig(21700, "ring-limits-restore-paths")) {
+            allShadow(rig);
+            rig.bootAll();
+            final Member leader = rig.awaitLeader(null);
+            final Member f = rig.followerOtherThan(leader, null);
+            final Member g = rig.followerOtherThan(leader, f);
+            final Client admin = rig.connect(SessionClass.ADMIN, g);
+            rig.adopt(admin);
+            final Client tool = rig.connect(SessionClass.TOOL, g);
+            tool.deposits(300);
+            rig.wrapEventRing(admin, g);
+            rig.awaitImagesEqual(f, leader, 60_000);
+            rig.assertRepliesEqualAfterRestore(leader, f, admin, "before any restart");
+            final long pCm = rig.snapshotAll();
+            tool.deposits(80);
+            rig.awaitImagesEqual(f, leader, 60_000);
+            final RecordedLog log = rig.captureCommitted(f);
+            final long[] pos = log.positions();
+            final int cm = Arrays.binarySearch(pos, pCm);
+            assertTrue("P_cm is a frame end with frames on both sides", cm >= 6 && cm + 6 < pos.length);
+            final long pLt = pos[cm - 6];
+            final long pGt = pos[cm + 6];
+            final long budget = f.settings.readyBudgetMs();
+
+            produce(rig, f, log, pLt, "TAIL(P_s<P_cm)");
+            production(rig, leader, f, tool, "ring R1", "TAIL P_s=" + pLt, budget);
+            assertEquals("core_restore_path TAIL", 4, ServiceProbe.rcs(f.service, "core_restore_path"));
+            rig.assertRepliesEqualAfterRestore(leader, f, admin, "TAIL");
+            produce(rig, f, log, pGt, "SKIP(P_s>P_cm)");
+            production(rig, leader, f, tool, "ring R2", "SKIP P_s=" + pGt, budget);
+            rig.assertRepliesEqualAfterRestore(leader, f, admin, "SKIP");
+            produce(rig, f, log, pCm, "EQUAL(P_s==P_cm)");
+            production(rig, leader, f, tool, "ring R3", "EQUAL P_s=" + pCm, budget);
+            assertEquals("core_restore_path EQUAL", 2, ServiceProbe.rcs(f.service, "core_restore_path"));
+            rig.assertRepliesEqualAfterRestore(leader, f, admin, "EQUAL");
+        }
+    }
+
+    /**
+     * The same story with full snapshots (no stub mode): the follower restarts from the full image in its own
+     * snapshot and replays the log above it. The path every member takes when shadows are off.
+     */
+    @Test
+    public void aWrappedEventRingAndTheLimitsRecordSurviveAFullImageRestore() throws Exception {
+        try (ShadowClusterRig rig = new ShadowClusterRig(21800, "ring-limits-restore-full")) {
+            rig.bootAll();
+            final Member leader = rig.awaitLeader(null);
+            final Member f = rig.followerOtherThan(leader, null);
+            final Member g = rig.followerOtherThan(leader, f);
+            final Client admin = rig.connect(SessionClass.ADMIN, g);
+            rig.adopt(admin);
+            final Client tool = rig.connect(SessionClass.TOOL, g);
+            tool.deposits(300);
+            rig.wrapEventRing(admin, g);
+            final long pCm = rig.snapshotAll();
+            tool.deposits(40);
+            rig.awaitImagesEqual(f, leader, 60_000);
+            rig.tee.clear();
+            rig.kill(f);
+            tool.deposits(40);
+            rig.restart(f);
+            rig.awaitReady(f, 120_000);
+            rig.awaitImagesEqual(f, leader, 60_000);
+            assertTrue(f.halts.toString(), f.halts.isEmpty());
+            System.out.println("[ring] full image restore from P_cm=" + pCm + ": " + rig.tee.all("restored"));
+            rig.assertRepliesEqualAfterRestore(leader, f, admin, "FULL");
+        }
+    }
+
     /** 11.2 control: stub mode, NO shadow, the follower's log pruned below P_cm: the path assertion must fail. */
     @Test
     public void controlWithoutShadowsAPrunedFollowerHaltsAndThePathAssertionFails() throws Exception {

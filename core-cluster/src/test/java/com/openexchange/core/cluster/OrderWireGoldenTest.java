@@ -71,7 +71,7 @@ public class OrderWireGoldenTest {
 
     @Test
     public void theUserCountRuleUsesTheCoreRequestTable() {
-        assertEquals(RequestTable.TTL_MS, CoreOrderLoadGenerator.REQUEST_TTL_MS);
-        assertEquals(RequestTable.PER_USER_CAP, CoreOrderLoadGenerator.REQUESTS_PER_USER_CAP);
+        assertEquals(RequestTable.DEFAULT_TTL_MS, CoreOrderLoadGenerator.REQUEST_TTL_MS);
+        assertEquals(RequestTable.DEFAULT_PER_USER_CAP, CoreOrderLoadGenerator.REQUESTS_PER_USER_CAP);
     }
 }

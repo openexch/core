@@ -37,3 +37,5 @@ ORDERREJECT corr=0 u=2 order=0 market=1 ref=50 reason=PRICE_OFF_TICK detail=0
 ADMINACK corr=73 ref=70 result=DUPLICATE reason=0 cfg=2
 ORDERREJECT corr=0 u=1 order=0 market=1 ref=50 reason=PRICE_OFF_TICK detail=10030000000
 ORDERACK corr=0 order=1 u=1 market=1 status=PENDING_CANCEL dup=0 holdAsset=0 hold=10030000000 seq=1
+ADMINACK corr=74 ref=70 result=REJECTED reason=15 cfg=2
+ADMINACK corr=75 ref=70 result=REJECTED reason=15 cfg=2

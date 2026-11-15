@@ -15,7 +15,15 @@ import com.openexchange.core.domain.GateReason;
 import com.openexchange.core.domain.GateState;
 import com.openexchange.core.domain.RejectReason;
 import com.openexchange.core.domain.SettleRejectReason;
+import com.openexchange.core.domain.Account;
+import com.openexchange.core.domain.Asset;
+import com.openexchange.core.domain.CoreConfigReportView;
+import com.openexchange.core.domain.OrderEventRecords;
 import com.openexchange.core.infrastructure.generated.AdminAckEncoder;
+import com.openexchange.core.infrastructure.generated.CoreConfigReportEncoder;
+import com.openexchange.core.infrastructure.generated.OrderEventsEndEncoder;
+import com.openexchange.core.infrastructure.generated.OrderEventsPageEncoder;
+import com.openexchange.core.infrastructure.generated.UserBalancesEncoder;
 import com.openexchange.core.infrastructure.generated.ConfigAppliedEncoder;
 import com.openexchange.core.infrastructure.generated.OrderFaultEncoder;
 import com.openexchange.core.infrastructure.generated.OrderSnapshotBatchEncoder;
@@ -169,6 +177,16 @@ public final class CoreEventPublisher implements CoreEventSink {
     private final OrderSnapshotBatchEncoder orderSnapshotBatchEncoder = new OrderSnapshotBatchEncoder();
     private final OrderSnapshotEndEncoder orderSnapshotEndEncoder = new OrderSnapshotEndEncoder();
     private final PendingDispatchEndEncoder pendingDispatchEndEncoder = new PendingDispatchEndEncoder();
+    // gateway query replies
+    private final OrderEventsPageEncoder orderEventsPageEncoder = new OrderEventsPageEncoder();
+    private final OrderEventsEndEncoder orderEventsEndEncoder = new OrderEventsEndEncoder();
+    private final UserBalancesEncoder userBalancesEncoder = new UserBalancesEncoder();
+    private final CoreConfigReportEncoder coreConfigReportEncoder = new CoreConfigReportEncoder();
+    /**
+     * OrderEventsPage entries per frame: 44 x 167 B + 20 B of headers = 7 368 B, under one 8 KiB MTU and inside
+     * {@link #BUFFER_CAPACITY}.
+     */
+    public static final int ORDER_EVENTS_FRAME_CAP = 44;
     /** 106 entries per frame (wire-v6 2.4.4): 56 x 160 B + 12 B of headers = 8 972 B, inside {@link #BUFFER_CAPACITY}. */
     public static final int ORDER_SNAPSHOT_FRAME_CAP = 56;
     private final HoldSnapshotEntryEncoder holdSnapshotEntryEncoder = new HoldSnapshotEntryEncoder();
@@ -406,20 +424,9 @@ public final class CoreEventPublisher implements CoreEventSink {
     @Override
     public void onOrderEvent(long eventSeq, long logPosition, CoreOrderView o, EventKind kind, CoreRejectReason reason,
                              long lastPrice, long lastQty, long tradeId, long holdRemaining, long updatedAtMs, int meReason) {
-        orderEventEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
-                .eventSeq(eventSeq).logPosition(logPosition).orderId(o.orderId()).userId(o.userId()).marketId(o.marketId())
-                .eventKind(com.openexchange.core.infrastructure.generated.EventKind.get((short) kind.code()))
-                .status(com.openexchange.core.infrastructure.generated.OrderStatus.get((short) o.statusCode()))
-                .reason(com.openexchange.core.infrastructure.generated.CoreRejectReason.get((short) reason.code()))
-                .side(com.openexchange.core.infrastructure.generated.Side.get((short) o.sideCode()))
-                .orderType(com.openexchange.core.infrastructure.generated.OrderType.get((short) o.orderTypeCode()))
-                .timeInForce(com.openexchange.core.infrastructure.generated.TimeInForce.get((short) o.timeInForceCode()))
-                .price(o.price()).stopPrice(o.stopPrice()).quantity(o.quantity()).filledQty(o.filledQty())
-                .remainingQty(o.remainingQty()).lastPrice(lastPrice).lastQty(lastQty).tradeId(tradeId)
-                .meOrderId(o.meOrderId()).holdAssetId(o.holdAssetId()).holdAmount(o.holdAmount()).holdRemaining(holdRemaining)
-                .clientOrderIdHigh(o.clientOrderIdHigh()).clientOrderIdLow(o.clientOrderIdLow())
-                .createdAtMs(o.createdAtMs()).updatedAtMs(updatedAtMs)
-                .meReason((short) meReason); // v7: the ME code on ME-caused events, else 255
+        // one body encoder for the broadcast and for the replay ring: a replayed record is these bytes
+        OrderEventRecordCodec.encode(orderEventEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder), eventSeq, logPosition, o,
+                kind, reason, lastPrice, lastQty, tradeId, holdRemaining, updatedAtMs, meReason);
         flush(orderEventEncoder.encodedLength(), CH_ORDERS, Routing.BROADCAST);
     }
 
@@ -539,6 +546,89 @@ public final class CoreEventPublisher implements CoreEventSink {
         encodeDispatch(dispatchSeq, commandIdHigh, commandIdLow, kind, userId, omsOrderId, oldOrderId, marketId, orderTypeCode,
                 sideCode, price, quantity, budget, timeInForceCode, releaseScope, expectedOldRemaining);
         flush(meDispatchEncoder.encodedLength(), CH_DISPATCH, Routing.ORIGIN);
+    }
+
+    // ---- gateway query replies (all ORIGIN) ----
+
+    @Override
+    public void onOrderEventsPage(long correlationId, OrderEventRecords records, long firstEventSeq, int count) {
+        for (int from = 0; from < count; from += ORDER_EVENTS_FRAME_CAP) {
+            final int n = Math.min(ORDER_EVENTS_FRAME_CAP, count - from);
+            orderEventsPageEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder).correlationId(correlationId);
+            final OrderEventsPageEncoder.EventsEncoder g = orderEventsPageEncoder.eventsCount(n);
+            for (int i = 0; i < n; i++) {
+                final int at = orderEventsPageEncoder.limit(); // where next() places this entry
+                g.next();
+                records.copyRecord(firstEventSeq + from + i, buffer, at);
+            }
+            flush(orderEventsPageEncoder.encodedLength(), CH_SNAPSHOTS, Routing.ORIGIN);
+        }
+    }
+
+    @Override
+    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) {
+        orderEventsEndEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
+                .correlationId(correlationId).count(count).firstAvailableSeq(firstAvailableSeq).lastSeq(lastSeq)
+                .nextFromSeq(nextFromSeq);
+        flush(orderEventsEndEncoder.encodedLength(), CH_SNAPSHOTS, Routing.ORIGIN);
+    }
+
+    @Override
+    public void onUserBalances(long correlationId, long userId, boolean known, long asOfLogPosition, Account account) {
+        userBalancesEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
+                .correlationId(correlationId).userId(userId).known(known ? BoolFlag.TRUE : BoolFlag.FALSE)
+                .asOfLogPosition(asOfLogPosition);
+        int lines = 0;
+        if (account != null) {
+            for (int assetId = 0; assetId < Asset.count(); assetId++) {
+                if (account.available(assetId) != 0L || account.locked(assetId) != 0L) {
+                    lines++;
+                }
+            }
+        }
+        final UserBalancesEncoder.BalancesEncoder g = userBalancesEncoder.balancesCount(lines);
+        if (account != null) {
+            for (int assetId = 0; assetId < Asset.count(); assetId++) {
+                final long available = account.available(assetId);
+                final long locked = account.locked(assetId);
+                if (available != 0L || locked != 0L) {
+                    g.next().assetId(assetId).available(available).locked(locked);
+                }
+            }
+        }
+        flush(userBalancesEncoder.encodedLength(), CH_SNAPSHOTS, Routing.ORIGIN);
+    }
+
+    @Override
+    public void onCoreConfigReport(long correlationId, CoreConfigReportView r, long asOfLogPosition) {
+        coreConfigReportEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
+                .correlationId(correlationId).configVersion(r.configVersion()).behaviorVersion(r.behaviorVersion())
+                .limitsVersion(r.limitsVersion()).requestTtlMs(r.requestTtlMs()).requestPerUserCap(r.requestPerUserCap())
+                .orderEventRingCapacity(r.orderEventRingCapacity())
+                .gateState(com.openexchange.core.infrastructure.generated.GateState.get((short) r.gateStateCode()))
+                .asOfLogPosition(asOfLogPosition);
+        // the reason sets are written as their raw bitmask: one bit per GateReason value, exactly the engine's set
+        buffer.putInt(MessageHeaderEncoder.ENCODED_LENGTH + CoreConfigReportEncoder.gateReasonsEncodingOffset(), r.gateReasons(),
+                java.nio.ByteOrder.LITTLE_ENDIAN);
+        final int markets = r.marketCount();
+        final CoreConfigReportEncoder.MarketsEncoder m = coreConfigReportEncoder.marketsCount(markets);
+        for (int i = 0; i < markets; i++) {
+            final int at = coreConfigReportEncoder.limit(); // where next() places this entry
+            m.next().marketId(r.marketId(i)).symbol(r.symbol(i)).baseAssetId(r.baseAssetId(i)).quoteAssetId(r.quoteAssetId(i))
+                    .tickSize(r.tickSize(i)).minPrice(r.minPrice(i)).maxPrice(r.maxPrice(i)).lotSize(r.lotSize(i))
+                    .minQuantity(r.minQuantity(i)).maxQuantity(r.maxQuantity(i)).minNotional(r.minNotional(i))
+                    .maxNotional(r.maxNotional(i)).riskConfigVersion(r.riskConfigVersion(i))
+                    .gateState(com.openexchange.core.infrastructure.generated.GateState.get((short) r.marketGateStateCode(i)))
+                    .circuitBreaker(r.circuitBreaker(i) ? BoolFlag.TRUE : BoolFlag.FALSE);
+            buffer.putInt(at + CoreConfigReportEncoder.MarketsEncoder.gateReasonsEncodingOffset(), r.marketGateReasons(i),
+                    java.nio.ByteOrder.LITTLE_ENDIAN);
+        }
+        final int assets = r.assetCount();
+        final CoreConfigReportEncoder.AssetsEncoder a = coreConfigReportEncoder.assetsCount(assets);
+        for (int i = 0; i < assets; i++) {
+            a.next().assetId(r.assetId(i)).code(r.assetCode(i)).scale((short) r.assetScale(i));
+        }
+        flush(coreConfigReportEncoder.encodedLength(), CH_SNAPSHOTS, Routing.ORIGIN);
     }
 
     private void flush(int bodyLength, int channel, Routing routing) {

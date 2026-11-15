@@ -209,4 +209,24 @@ public interface CoreEventSink {
      * orphan rows and the abandonment, which are not release results.
      */
     default void onReleaseEffect(long orderId, long floor, ReleaseScope scope, ReleaseResult result, int row) { }
+
+    // ---- gateway queries (defaults are no-ops so that sinks outside their scope need not change) ----
+
+    /**
+     * ORIGIN reply entries for RequestOrderEvents (wire OrderEventsPage, framed by the publisher): the {@code count}
+     * retained events from {@code firstEventSeq} on, ascending and dense.
+     */
+    default void onOrderEventsPage(long correlationId, OrderEventRecords records, long firstEventSeq, int count) { }
+
+    /** ORIGIN terminator for RequestOrderEvents (wire OrderEventsEnd). */
+    default void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) { }
+
+    /**
+     * ORIGIN reply to RequestUserBalances (wire UserBalances). {@code account} is null when no account record exists
+     * ({@code known} false); the publisher writes one entry per asset with a nonzero available or locked amount.
+     */
+    default void onUserBalances(long correlationId, long userId, boolean known, long asOfLogPosition, Account account) { }
+
+    /** ORIGIN reply to RequestCoreConfig (wire CoreConfigReport). The view is valid only during the call. */
+    default void onCoreConfigReport(long correlationId, CoreConfigReportView report, long asOfLogPosition) { }
 }

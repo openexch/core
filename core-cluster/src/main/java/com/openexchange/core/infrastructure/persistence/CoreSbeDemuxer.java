@@ -57,6 +57,10 @@ import com.openexchange.core.infrastructure.generated.SetMoneyJournalDecoder;
 import com.openexchange.core.infrastructure.generated.SettleBatchDecoder;
 import com.openexchange.core.infrastructure.generated.SettleDecoder;
 import com.openexchange.core.infrastructure.generated.SubscribeDecoder;
+import com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder;
+import com.openexchange.core.infrastructure.generated.RequestCoreConfigDecoder;
+import com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder;
+import com.openexchange.core.infrastructure.generated.RequestUserBalancesDecoder;
 import com.openexchange.core.infrastructure.generated.TerminalReleaseDecoder;
 import com.openexchange.core.infrastructure.generated.WithdrawDecoder;
 import org.agrona.DirectBuffer;
@@ -86,8 +90,8 @@ public final class CoreSbeDemuxer {
 
     /**
      * The wire identity every ingress frame must carry. The version gate is EXACT: the core
-     * speaks v7 only (single-manifest clean-genesis cut); a v6 producer is dropped and counted rather
-     * than decoded with its {@code sinceVersion="7"} fields silently absent, and no v7 frame reaches a v6 core.
+     * speaks v8 only (single-manifest clean-genesis cut); a v7 producer is dropped and counted rather
+     * than half-understood, and no v8 frame reaches a v7 core.
      * A later additive bump turns this into a range again, with the ME's rule: the floor advances only when
      * pre-floor producers and pre-floor frames in any replayable log are provably gone.
      */
@@ -157,6 +161,9 @@ public final class CoreSbeDemuxer {
             case RequestOrderSnapshotDecoder.TEMPLATE_ID:
             case RequestPendingDispatchDecoder.TEMPLATE_ID:
             case RequestRiskConfigDecoder.TEMPLATE_ID:
+            case RequestOrderEventsDecoder.TEMPLATE_ID:
+            case RequestUserBalancesDecoder.TEMPLATE_ID:
+            case RequestCoreConfigDecoder.TEMPLATE_ID:
                 return true;
             default:
                 return false;
@@ -204,6 +211,11 @@ public final class CoreSbeDemuxer {
             case MeCommandReleaseDecoder.TEMPLATE_ID:       return MeCommandReleaseDecoder.BLOCK_LENGTH;
             case MeEngineConfigDecoder.TEMPLATE_ID:         return MeEngineConfigDecoder.BLOCK_LENGTH;
             case FeedLatchClearDecoder.TEMPLATE_ID:         return FeedLatchClearDecoder.BLOCK_LENGTH;
+            // v8: the gateway queries and the limits record.
+            case RequestOrderEventsDecoder.TEMPLATE_ID:     return RequestOrderEventsDecoder.BLOCK_LENGTH;
+            case RequestUserBalancesDecoder.TEMPLATE_ID:    return RequestUserBalancesDecoder.BLOCK_LENGTH;
+            case RequestCoreConfigDecoder.TEMPLATE_ID:      return RequestCoreConfigDecoder.BLOCK_LENGTH;
+            case CoreLimitsSetDecoder.TEMPLATE_ID:          return CoreLimitsSetDecoder.BLOCK_LENGTH;
             default: return -1;
         }
     }
@@ -280,16 +292,24 @@ public final class CoreSbeDemuxer {
         CLASS_MASK[MeCommandReleaseDecoder.TEMPLATE_ID] = BIT_BRIDGE;
         CLASS_MASK[MeEngineConfigDecoder.TEMPLATE_ID] = BIT_BRIDGE;
         CLASS_MASK[FeedLatchClearDecoder.TEMPLATE_ID] = BIT_ADMIN;
+        // v8: the three gateway queries are GATEWAY or ADMIN (registration required for a gateway); the limits record
+        // is ADMIN. The FORWARDER, BRIDGE, TOOL and TREASURY classes get none of them.
+        CLASS_MASK[RequestOrderEventsDecoder.TEMPLATE_ID] = BIT_GATEWAY | BIT_ADMIN;
+        CLASS_MASK[RequestUserBalancesDecoder.TEMPLATE_ID] = BIT_GATEWAY | BIT_ADMIN;
+        CLASS_MASK[RequestCoreConfigDecoder.TEMPLATE_ID] = BIT_GATEWAY | BIT_ADMIN;
+        CLASS_MASK[CoreLimitsSetDecoder.TEMPLATE_ID] = BIT_ADMIN;
         PRE_REGISTRATION[QueryFeedPositionDecoder.TEMPLATE_ID] = true;
         PRE_REGISTRATION[SubscribeDecoder.TEMPLATE_ID] = true;
         PRE_REGISTRATION[RegisterSessionDecoder.TEMPLATE_ID] = true;
         for (final int t : new int[] {DepositDecoder.TEMPLATE_ID, WithdrawDecoder.TEMPLATE_ID, HoldDecoder.TEMPLATE_ID,
                 ReleaseDecoder.TEMPLATE_ID, CreateOrderDecoder.TEMPLATE_ID, CancelOrderDecoder.TEMPLATE_ID,
-                AmendOrderDecoder.TEMPLATE_ID, RequestOrderSnapshotDecoder.TEMPLATE_ID}) {
+                AmendOrderDecoder.TEMPLATE_ID, RequestOrderSnapshotDecoder.TEMPLATE_ID,
+                RequestUserBalancesDecoder.TEMPLATE_ID}) {
             USER_SCOPED[t] = true;
         }
         // v7: 66 FeedHalt and 76 FeedLatchClear start with a correlationId; 67 and 68 do not (correlationIdOf = 0).
-        for (final int t : new int[] {1, 2, 3, 7, 8, 9, 32, 50, 51, 52, 53, 65, 66, 70, 71, 72, 73, 74, 75, 76, 80}) {
+        for (final int t : new int[] {1, 2, 3, 7, 8, 9, 32, 50, 51, 52, 53, 54, 55, 56, 65, 66, 70, 71, 72, 73, 74, 75, 76, 77,
+                80}) {
             HAS_CORRELATION[t] = true;
         }
     }
@@ -320,6 +340,10 @@ public final class CoreSbeDemuxer {
     private final FeedHaltDecoder feedHaltDecoder = new FeedHaltDecoder();
     private final MeEngineConfigDecoder meEngineConfigDecoder = new MeEngineConfigDecoder();
     private final FeedLatchClearDecoder feedLatchClearDecoder = new FeedLatchClearDecoder();
+    private final RequestOrderEventsDecoder requestOrderEventsDecoder = new RequestOrderEventsDecoder();
+    private final RequestUserBalancesDecoder requestUserBalancesDecoder = new RequestUserBalancesDecoder();
+    private final RequestCoreConfigDecoder requestCoreConfigDecoder = new RequestCoreConfigDecoder();
+    private final CoreLimitsSetDecoder coreLimitsSetDecoder = new CoreLimitsSetDecoder();
     private final AmendOrderCommand amendOrderCommand = new AmendOrderCommand();
     private final CreateOrderCommand createOrderCommand = new CreateOrderCommand();
     private final CancelOrderCommand cancelOrderCommand = new CancelOrderCommand();
@@ -473,6 +497,12 @@ public final class CoreSbeDemuxer {
                     return;
                 }
             }
+            // The order-event replay is exchange-wide (every user's events), so only a key that may act for any user
+            // may read it; a user-scoped key owns no such stream.
+            if (templateId == RequestOrderEventsDecoder.TEMPLATE_ID && !authority.principal().anyUser()) {
+                engine.rejectUnauthorised(templateId, correlationIdOf(templateId), 0L, CoreRejectReason.NOT_OWNER, 0L);
+                return;
+            }
         }
 
         // 6. Body decode and apply. Decode poison (IAE/IOOBE before any application callback) is dropped
@@ -515,6 +545,10 @@ public final class CoreSbeDemuxer {
                 case MeCommandReleaseDecoder.TEMPLATE_ID:    handleMeCommandRelease(timestamp); break;
                 case MeEngineConfigDecoder.TEMPLATE_ID:      handleMeEngineConfig(timestamp); break;
                 case FeedLatchClearDecoder.TEMPLATE_ID:      handleFeedLatchClear(timestamp); break;
+                case RequestOrderEventsDecoder.TEMPLATE_ID:  handleRequestOrderEvents(); break;
+                case RequestUserBalancesDecoder.TEMPLATE_ID: handleRequestUserBalances(); break;
+                case RequestCoreConfigDecoder.TEMPLATE_ID:   handleRequestCoreConfig(); break;
+                case CoreLimitsSetDecoder.TEMPLATE_ID:       handleCoreLimitsSet(timestamp); break;
                 case SubscribeDecoder.TEMPLATE_ID:
                     // Transport-level; consumed at the service boundary before dispatch. Reaching
                     // here means the service peek declined it (bad length/version): drop, count.
@@ -1007,6 +1041,36 @@ public final class CoreSbeDemuxer {
         engine.feed().setLanesBehind(behind);
     }
 
+    // ---- v8: gateway queries (read-only) and the limits record ----
+
+    private void handleRequestOrderEvents() {
+        requestOrderEventsDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
+        applying = true;
+        engine.orders().applyRequestOrderEvents(requestOrderEventsDecoder.correlationId(),
+                requestOrderEventsDecoder.fromEventSeq(), requestOrderEventsDecoder.maxEvents());
+    }
+
+    private void handleRequestUserBalances() {
+        requestUserBalancesDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
+        applying = true;
+        engine.requestUserBalances(requestUserBalancesDecoder.correlationId(), requestUserBalancesDecoder.userId());
+    }
+
+    private void handleRequestCoreConfig() {
+        requestCoreConfigDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
+        applying = true;
+        engine.requestCoreConfig(requestCoreConfigDecoder.correlationId());
+    }
+
+    /** CoreLimitsSet (77, ADMIN): every value is a number the engine judges; nothing here is decode poison. */
+    private void handleCoreLimitsSet(final long timestamp) {
+        coreLimitsSetDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
+        applying = true;
+        engine.applyCoreLimitsSet(coreLimitsSetDecoder.correlationId(), coreLimitsSetDecoder.configVersion(),
+                coreLimitsSetDecoder.requestTtlMs(), coreLimitsSetDecoder.requestPerUserCap(),
+                coreLimitsSetDecoder.orderEventRingCapacity(), timestamp);
+    }
+
     private void handleRequestPendingDispatch() {
         requestPendingDispatchDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
         applying = true;
@@ -1415,6 +1479,7 @@ public final class CoreSbeDemuxer {
             case CancelOrderDecoder.TEMPLATE_ID: return frame.getLong(HEADER + CancelOrderDecoder.userIdEncodingOffset());
             case AmendOrderDecoder.TEMPLATE_ID:  return frame.getLong(HEADER + AmendOrderDecoder.userIdEncodingOffset());
             case RequestOrderSnapshotDecoder.TEMPLATE_ID: return frame.getLong(HEADER + RequestOrderSnapshotDecoder.userIdEncodingOffset());
+            case RequestUserBalancesDecoder.TEMPLATE_ID: return frame.getLong(HEADER + RequestUserBalancesDecoder.userIdEncodingOffset());
             default: return 0L;
         }
     }

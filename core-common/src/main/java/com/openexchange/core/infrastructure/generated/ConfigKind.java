@@ -12,6 +12,12 @@ public enum ConfigKind
 
     GATE((short)3),
 
+
+    /**
+     * v8: the core limits record (CoreLimitsSet 77); marketId 0
+     */
+    LIMITS((short)4),
+
     /**
      * To be used to represent not present or null.
      */
@@ -48,6 +54,7 @@ public enum ConfigKind
             case 1: return RISK;
             case 2: return BREAKER;
             case 3: return GATE;
+            case 4: return LIMITS;
             case 255: return NULL_VAL;
         }
 

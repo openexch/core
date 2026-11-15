@@ -265,4 +265,68 @@ public final class RecordingCoreSink implements CoreEventSink {
                 oldOrderId, marketId, orderTypeCode, sideCode, price, quantity, budget, timeInForceCode, releaseScope,
                 expectedOldRemaining));
     }
+
+    // ---- gateway query replies ----
+
+    private final org.agrona.concurrent.UnsafeBuffer replayRecord = new org.agrona.concurrent.UnsafeBuffer(
+            new byte[com.openexchange.core.infrastructure.generated.OrderEventDecoder.BLOCK_LENGTH]);
+    private final com.openexchange.core.infrastructure.generated.OrderEventDecoder replayDecoder =
+            new com.openexchange.core.infrastructure.generated.OrderEventDecoder();
+
+    @Override
+    public void onOrderEventsPage(long correlationId, com.openexchange.core.domain.OrderEventRecords records, long firstEventSeq,
+                                  int count) {
+        final int length = records.recordLength();
+        for (int i = 0; i < count; i++) {
+            records.copyRecord(firstEventSeq + i, replayRecord, 0);
+            final var d = replayDecoder.wrap(replayRecord, 0, length,
+                    com.openexchange.core.infrastructure.generated.OrderEventDecoder.SCHEMA_VERSION);
+            final StringBuilder hex = new StringBuilder(length * 2);
+            for (int b = 0; b < length; b++) {
+                hex.append(String.format("%02x", replayRecord.getByte(b)));
+            }
+            events.add(new CoreEngineEvent.OrderEventReplay(correlationId, d.eventSeq(), d.logPosition(), d.orderId(), d.userId(),
+                    d.marketId(), d.eventKind().name(), d.status().name(), d.reason().name(), d.price(), d.quantity(),
+                    d.filledQty(), d.remainingQty(), d.lastPrice(), d.lastQty(), d.tradeId(), d.meOrderId(), d.holdAssetId(),
+                    d.holdAmount(), d.holdRemaining(), d.meReason(), hex.toString()));
+        }
+    }
+
+    @Override
+    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) {
+        events.add(new CoreEngineEvent.OrderEventsEnd(correlationId, count, firstAvailableSeq, lastSeq, nextFromSeq));
+    }
+
+    @Override
+    public void onUserBalances(long correlationId, long userId, boolean known, long asOfLogPosition,
+                               com.openexchange.core.domain.Account account) {
+        final StringBuilder lines = new StringBuilder();
+        if (account != null) {
+            account.forEachNonZeroBalance((assetId, available, locked) -> {
+                if (lines.length() > 0) {
+                    lines.append(' ');
+                }
+                lines.append(assetId).append(':').append(available).append('/').append(locked);
+            });
+        }
+        events.add(new CoreEngineEvent.UserBalances(correlationId, userId, known, lines.toString()));
+    }
+
+    @Override
+    public void onCoreConfigReport(long correlationId, com.openexchange.core.domain.CoreConfigReportView r, long asOfLogPosition) {
+        final List<String> markets = new ArrayList<>();
+        for (int i = 0; i < r.marketCount(); i++) {
+            markets.add(String.format("%d:%s base=%d quote=%d tick=%d min=%d max=%d lot=%d minQty=%d maxQty=%d minNotional=%d maxNotional=%d risk=%d gate=%d reasons=0x%x breaker=%d",
+                    r.marketId(i), r.symbol(i), r.baseAssetId(i), r.quoteAssetId(i), r.tickSize(i), r.minPrice(i), r.maxPrice(i),
+                    r.lotSize(i), r.minQuantity(i), r.maxQuantity(i), r.minNotional(i), r.maxNotional(i), r.riskConfigVersion(i),
+                    r.marketGateStateCode(i), r.marketGateReasons(i), r.circuitBreaker(i) ? 1 : 0));
+        }
+        final List<String> assets = new ArrayList<>();
+        for (int i = 0; i < r.assetCount(); i++) {
+            assets.add(r.assetId(i) + ":" + r.assetCode(i) + "/" + r.assetScale(i));
+        }
+        events.add(new CoreEngineEvent.CoreConfigReport(correlationId, r.configVersion(), r.behaviorVersion(), r.limitsVersion(),
+                r.requestTtlMs(), r.requestPerUserCap(), r.orderEventRingCapacity(), r.gateStateCode(), r.gateReasons(), markets,
+                assets));
+    }
 }

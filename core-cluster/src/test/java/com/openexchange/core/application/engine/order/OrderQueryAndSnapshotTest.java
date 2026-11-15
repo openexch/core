@@ -165,7 +165,7 @@ public class OrderQueryAndSnapshotTest {
             for (int i = 0; i < batch; i++) {
                 r.create(r.limit(1, 1, 0, ONE, ONE));
             }
-            r.advance(RequestTable.TTL_MS + 1_000);
+            r.advance(RequestTable.DEFAULT_TTL_MS + 1_000);
             r.sweep();
         }
         assertEquals("rig precondition: 600 live orders for user 1", 600, r.orders.orders().openCount(1));

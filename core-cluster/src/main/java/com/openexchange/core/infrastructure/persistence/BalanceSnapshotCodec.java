@@ -9,6 +9,7 @@ import com.openexchange.core.application.engine.gate.OrderEntryGate;
 import com.openexchange.core.application.engine.order.CoreOrder;
 import com.openexchange.core.application.engine.order.MarketRisk;
 import com.openexchange.core.application.engine.order.OrderEngine;
+import com.openexchange.core.application.engine.order.OrderEventRing;
 import com.openexchange.core.application.engine.order.RequestTable;
 import com.openexchange.core.application.engine.order.UserRisk;
 import com.openexchange.core.application.engine.session.SessionAuthority;
@@ -23,10 +24,10 @@ import org.agrona.MutableDirectBuffer;
  * dependency. An infrastructure adapter: it reads the {@link Account} aggregates through their public
  * accessors and writes bytes; the domain never knows about serialization.
  *
- * <p><b>PAYLOAD v5 (the v4 layout plus section 12, the lane-halt table,
- * whose cutover is a clean genesis: the tag moved from -4 to -5 so a v4 image is refused):</b></p>
+ * <p><b>PAYLOAD v6 (the v5 layout plus section 13, the limits record, and section 14, the order-event replay
+ * ring; the cutover is a clean genesis: the tag moved from -5 to -6 so a v5 image is refused):</b></p>
  * <pre>
- *   [layoutTag          : long]   // LAYOUT_V5_TAG (-5, 4R); anything else is refused
+ *   [layoutTag          : long]   // LAYOUT_V6_TAG (-6); anything else is refused
  *   [lastAppliedTradeId : long]
  *   [consumePosition    : long]
  *   [journalSeq         : long]
@@ -41,8 +42,8 @@ import org.agrona.MutableDirectBuffer;
  * </pre>
  * Section 1 ACCOUNTS: {@code [numAccounts:int]} then per account {@code userId:long, numAssets:int,
  * (available:long, locked:long) x numAssets, numHolds:int, (orderId:long, assetId:int, remaining:long,
- * omsManagedRelease:byte) x numHolds}. Sections 2..8 are reserved by the layout page and land with their
- * slices; a reader refuses an id it does not know and treats an absent section as empty.
+ * omsManagedRelease:byte) x numHolds}. A reader refuses an id it does not know. Sections 10 to 12 are written
+ * from behaviour 3 on and are mandatory then; sections 13 and 14 are mandatory on every behaviour.
  *
  * <p>The engine scalars are written first, so the consume position and the journal sequence are restored
  * <em>atomically</em> with the balances they produced: recovery has no skew between "which trades are
@@ -64,8 +65,10 @@ public final class BalanceSnapshotCodec {
 
     /** The v4 tag; refused (the v5 cutover is a clean genesis). */
     public static final long LAYOUT_V4_TAG = -4L;
-    /** The layout tag after section 12 FEED_HALTS joined the v3 image. */
+    /** The layout tag after section 12 FEED_HALTS joined the v3 image; refused (the v6 cutover is a clean genesis). */
     public static final long LAYOUT_V5_TAG = -5L;
+    /** The layout tag after sections 13 LIMITS and 14 ORDER_EVENT_RING joined: both mandatory, every behaviour. */
+    public static final long LAYOUT_V6_TAG = -6L;
 
     public static final short SECTION_ACCOUNTS = 1;
     public static final short SECTION_ORDERS = 2;
@@ -95,6 +98,19 @@ public final class BalanceSnapshotCodec {
      * Written iff the recorded behaviour is 3 or more and mandatory then, refused below 3.
      */
     public static final short SECTION_FEED_HALTS = 12;
+    /**
+     * The limits record ({@code CoreLimits}): version, requestTtlMs, requestPerUserCap, orderEventRingCapacity;
+     * exactly {@link #LIMITS_BYTES} bytes. Mandatory, every behaviour.
+     */
+    public static final short SECTION_LIMITS = 13;
+    /**
+     * The order-event replay ring: head {@code capacity:int, firstSeq:long, count:int}, then {@code count} packed
+     * OrderEvent bodies in ascending eventSeq. Mandatory, every behaviour. The capacity equals section 13's, the
+     * records end at the image's eventSeq, and every record carries its own eventSeq; anything else is refused.
+     */
+    public static final short SECTION_ORDER_EVENT_RING = 14;
+    public static final int LIMITS_BYTES = 8 + 8 + 4 + 4;
+    public static final int ORDER_EVENT_RING_HEAD_BYTES = 4 + 8 + 4;
     /** Section 11 head and entry sizes. */
     public static final int ME_LINK_HEAD_BYTES = 16;
     public static final int ME_LINK_ENTRY_BYTES = 56;
@@ -145,7 +161,7 @@ public final class BalanceSnapshotCodec {
     public static int serialize(CoreEngine engine, MutableDirectBuffer dst, int offset) {
         final int[] pos = {offset};
 
-        dst.putLong(pos[0], LAYOUT_V5_TAG);
+        dst.putLong(pos[0], LAYOUT_V6_TAG);
         pos[0] += 8;
         dst.putLong(pos[0], engine.getLastAppliedTradeId());
         pos[0] += 8;
@@ -168,7 +184,7 @@ public final class BalanceSnapshotCodec {
         // 9 SESSIONS on this build; 7 and 8 land with their slices.
         final boolean withConfig = engine.coreConfig().recorded() != null;
         final boolean withFeed = engine.behaviorV3(); // Section 10 iff behaviour >= 3
-        dst.putInt(pos[0], (withConfig ? 8 : 7) + (withFeed ? 3 : 0)); // 11 with 10: 12 with them
+        dst.putInt(pos[0], (withConfig ? 8 : 7) + (withFeed ? 3 : 0) + 2); // 10, 11, 12 together; 13 and 14 always
         pos[0] += 4;
         pos[0] = writeAccountsSection(engine, dst, pos[0]);
         pos[0] = writeOrdersSection(engine, dst, pos[0]);
@@ -185,8 +201,85 @@ public final class BalanceSnapshotCodec {
             pos[0] = writeMeLinkSection(engine, dst, pos[0]);
             pos[0] = writeFeedHaltsSection(engine, dst, pos[0]);
         }
+        pos[0] = writeLimitsSection(engine, dst, pos[0]);
+        pos[0] = writeOrderEventRingSection(engine, dst, pos[0]);
 
         return pos[0] - offset;
+    }
+
+    /** Section 13: the limits record. */
+    private static int writeLimitsSection(CoreEngine engine, MutableDirectBuffer dst, int start) {
+        int p = start;
+        dst.putShort(p, SECTION_LIMITS); p += 2;
+        dst.putInt(p, LIMITS_BYTES); p += 4;
+        dst.putLong(p, engine.limits().version()); p += 8;
+        dst.putLong(p, engine.limits().requestTtlMs()); p += 8;
+        dst.putInt(p, engine.limits().requestPerUserCap()); p += 4;
+        dst.putInt(p, engine.limits().orderEventRingCapacity()); p += 4;
+        return p;
+    }
+
+    private static void readLimitsSection(DirectBuffer src, int start, int length, CoreEngine engine) {
+        if (length != LIMITS_BYTES) {
+            throw new IllegalStateException("balance snapshot LIMITS section is " + length + " bytes, not " + LIMITS_BYTES);
+        }
+        final long version = src.getLong(start);
+        final long ttl = src.getLong(start + 8);
+        final int cap = src.getInt(start + 16);
+        final int ring = src.getInt(start + 20);
+        if (version < 0 || !com.openexchange.core.application.engine.config.CoreLimits.valid(ttl, cap, ring)) {
+            throw new IllegalStateException("balance snapshot LIMITS section: version " + version + " requestTtlMs " + ttl
+                    + " requestPerUserCap " + cap + " orderEventRingCapacity " + ring);
+        }
+        engine.restoreLimits(version, ttl, cap, ring);
+    }
+
+    /** Section 14: the replay ring, oldest record first. */
+    private static int writeOrderEventRingSection(CoreEngine engine, MutableDirectBuffer dst, int start) {
+        final OrderEventRing ring = engine.orders().eventRing();
+        final int count = ring.count();
+        final long firstSeq = engine.getEventSeq() - count + 1;
+        int p = start;
+        dst.putShort(p, SECTION_ORDER_EVENT_RING); p += 2;
+        dst.putInt(p, ORDER_EVENT_RING_HEAD_BYTES + count * OrderEventRing.RECORD_BYTES); p += 4;
+        dst.putInt(p, ring.capacity()); p += 4;
+        dst.putLong(p, firstSeq); p += 8;
+        dst.putInt(p, count); p += 4;
+        dst.checkLimit(p + count * OrderEventRing.RECORD_BYTES); // one growth for the whole body, not one per record
+        for (int i = 0; i < count; i++) {
+            ring.copyRecord(firstSeq + i, dst, p);
+            p += OrderEventRing.RECORD_BYTES;
+        }
+        return p;
+    }
+
+    /** Needs the image's eventSeq and section 13 (both come earlier in the payload). */
+    private static void readOrderEventRingSection(DirectBuffer src, int start, int length, CoreEngine engine) {
+        if (length < ORDER_EVENT_RING_HEAD_BYTES) {
+            throw new IllegalStateException("balance snapshot ORDER_EVENT_RING section is " + length + " bytes, below its head");
+        }
+        final int capacity = src.getInt(start);
+        final long firstSeq = src.getLong(start + 4);
+        final int count = src.getInt(start + 12);
+        if (capacity != engine.limits().orderEventRingCapacity() || count < 0 || count > capacity
+                || (long) count * OrderEventRing.RECORD_BYTES != length - ORDER_EVENT_RING_HEAD_BYTES
+                || firstSeq != engine.getEventSeq() - count + 1) {
+            throw new IllegalStateException("balance snapshot ORDER_EVENT_RING section: capacity " + capacity + " (limits "
+                    + engine.limits().orderEventRingCapacity() + ") firstSeq " + firstSeq + " count " + count + " in " + length
+                    + " bytes against eventSeq " + engine.getEventSeq());
+        }
+        final OrderEventRing ring = engine.orders().eventRing();
+        ring.resize(capacity);
+        int p = start + ORDER_EVENT_RING_HEAD_BYTES;
+        for (int i = 0; i < count; i++) {
+            final long seq = src.getLong(p, java.nio.ByteOrder.LITTLE_ENDIAN); // the record's own eventSeq (wire order)
+            if (seq != firstSeq + i) {
+                throw new IllegalStateException("balance snapshot ORDER_EVENT_RING section: record " + i + " carries eventSeq "
+                        + seq + ", expected " + (firstSeq + i));
+            }
+            ring.restoreRecord(seq, src, p);
+            p += OrderEventRing.RECORD_BYTES;
+        }
     }
 
     private static int writeAccountsSection(CoreEngine engine, MutableDirectBuffer dst, int start) {
@@ -816,9 +909,9 @@ public final class BalanceSnapshotCodec {
         }
         final long tag = src.getLong(pos);
         pos += 8;
-        if (tag != LAYOUT_V5_TAG) {
-            throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only v5 ("
-                    + LAYOUT_V5_TAG + "); older images are not restored (clean genesis)");
+        if (tag != LAYOUT_V6_TAG) {
+            throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only v6 ("
+                    + LAYOUT_V6_TAG + "); older images are not restored (clean genesis)");
         }
         final long lastAppliedTradeId = src.getLong(pos);
         pos += 8;
@@ -860,6 +953,8 @@ public final class BalanceSnapshotCodec {
         boolean feedSection = false;
         boolean linkSection = false;
         boolean haltsSection = false;
+        boolean limitsSection = false;
+        boolean ringSection = false;
         for (int s = 0; s < sectionCount; s++) {
             if (end - pos < SECTION_HEADER) {
                 throw new IllegalStateException("balance snapshot section " + s + " header runs past the payload");
@@ -948,6 +1043,18 @@ public final class BalanceSnapshotCodec {
                     readMeLinkSection(src, pos, sectionLength, engine);
                     linkSection = true;
                     break;
+                case SECTION_LIMITS:
+                    readLimitsSection(src, pos, sectionLength, engine);
+                    limitsSection = true;
+                    break;
+                case SECTION_ORDER_EVENT_RING:
+                    if (!limitsSection) {
+                        throw new IllegalStateException("balance snapshot ORDER_EVENT_RING section (14) without a LIMITS "
+                                + "section (13)");
+                    }
+                    readOrderEventRingSection(src, pos, sectionLength, engine);
+                    ringSection = true;
+                    break;
                 case SECTION_FEED_HALTS:
                     engine.feed().readHaltSection(src, pos, sectionLength, SECTION_FEED_HALTS);
                     haltsSection = true;
@@ -983,6 +1090,13 @@ public final class BalanceSnapshotCodec {
         }
         if (!v3 && haltsSection) {
             throw new IllegalStateException("balance snapshot below behaviour 3 carries a FEED_HALTS section (12)");
+        }
+        // Sections 13 and 14 are mandatory on every behaviour: an image without them is not a v6 image
+        if (!limitsSection) {
+            throw new IllegalStateException("balance snapshot has no LIMITS section (13)");
+        }
+        if (!ringSection) {
+            throw new IllegalStateException("balance snapshot has no ORDER_EVENT_RING section (14)");
         }
         engine.orders().rebuildDerived(); // The derived index and gauges, every behaviour
         return new Decoded(lastAppliedTradeId, consumePosition, journalSeq, lastLogTime, accounts, holds,

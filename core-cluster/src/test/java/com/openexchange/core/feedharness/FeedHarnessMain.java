@@ -125,6 +125,8 @@ public final class FeedHarnessMain {
                 "  e1 <e1-dir> <out-dir>",
                 "  " + HarnessCommands.STORY_USAGE,
                 "  apply <core.flog> <feed.ffr-or-flog> <out.json>",
+                "      (snapshotSha256 in the result is the sha256 of the snapshot image with the logPosition of every",
+                "      retained order event zeroed, not of the production image)",
                 "  serve",
                 "  t1-journal",
                 "  t1-core <command> ...");

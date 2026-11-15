@@ -279,6 +279,29 @@ final class CoreRestoreRig {
             return MessageHeaderEncoder.ENCODED_LENGTH + create.encodedLength();
         }
 
+        /** The ADMIN limits record. */
+        int limits(final long corr, final long version, final long ttlMs, final int perUserCap, final int ringCapacity) {
+            final com.openexchange.core.infrastructure.generated.CoreLimitsSetEncoder e =
+                    new com.openexchange.core.infrastructure.generated.CoreLimitsSetEncoder().wrapAndApplyHeader(buf, 0, header)
+                            .correlationId(corr).configVersion(version).requestTtlMs(ttlMs).requestPerUserCap(perUserCap)
+                            .orderEventRingCapacity(ringCapacity);
+            return MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength();
+        }
+
+        int orderEvents(final long corr, final long fromEventSeq, final int maxEvents) {
+            final com.openexchange.core.infrastructure.generated.RequestOrderEventsEncoder e =
+                    new com.openexchange.core.infrastructure.generated.RequestOrderEventsEncoder().wrapAndApplyHeader(buf, 0, header)
+                            .correlationId(corr).fromEventSeq(fromEventSeq).maxEvents(maxEvents);
+            return MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength();
+        }
+
+        int coreConfigRequest(final long corr) {
+            final com.openexchange.core.infrastructure.generated.RequestCoreConfigEncoder e =
+                    new com.openexchange.core.infrastructure.generated.RequestCoreConfigEncoder().wrapAndApplyHeader(buf, 0, header)
+                            .correlationId(corr);
+            return MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength();
+        }
+
         /** MeCommandOutcome APPLIED for (orderId, attempt 0, CREATE) carrying the ME leg id. */
         int createApplied(final long orderId, final long user, final int market, final long legId) {
             outcome.wrapAndApplyHeader(buf, 0, header).egressSeq(1).commandIdHigh(orderId).commandIdLow(0L).userId(user)

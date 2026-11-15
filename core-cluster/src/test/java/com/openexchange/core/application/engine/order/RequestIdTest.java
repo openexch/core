@@ -77,23 +77,23 @@ public class RequestIdTest {
     public void perUserCapAndTtlSweep() {
         final OrderRig r = OrderRig.open();
         r.deposit(1, USD, 1_000_000 * ONE);
-        for (int i = 0; i < RequestTable.PER_USER_CAP; i++) {
+        for (int i = 0; i < RequestTable.DEFAULT_PER_USER_CAP; i++) {
             final CreateOrderCommand c = r.limit(1, 1, 0, ONE, ONE);
             c.requestIdLow = 10_000 + i;
             c.clientOrderIdLow = 10_000 + i;
             r.create(c);
             r.advance(1_000); // stay under the rate limit
         }
-        assertEquals(RequestTable.PER_USER_CAP, r.orders.requests().countFor(1));
+        assertEquals(RequestTable.DEFAULT_PER_USER_CAP, r.orders.requests().countFor(1));
         r.markNow();
         final CreateOrderCommand over = r.limit(1, 1, 0, ONE, ONE);
         over.requestIdLow = 99_999;
         r.create(over);
         assertEquals(CoreRejectReason.TOO_MANY_PENDING_REQUESTS, r.reject().reason());
-        assertEquals(RequestTable.PER_USER_CAP, r.orders.requests().countFor(1));
+        assertEquals(RequestTable.DEFAULT_PER_USER_CAP, r.orders.requests().countFor(1));
         // every entry sits on the deadline index; the sweep at TTL drops them in order
-        assertTrue(r.engine.deadlines().size() >= RequestTable.PER_USER_CAP);
-        r.advance(RequestTable.TTL_MS);
+        assertTrue(r.engine.deadlines().size() >= RequestTable.DEFAULT_PER_USER_CAP);
+        r.advance(RequestTable.DEFAULT_TTL_MS);
         r.sweep();
         assertEquals(0, r.orders.requests().countFor(1));
         assertNull(r.orders.requests().get(1, 0xABCDL, 10_000));

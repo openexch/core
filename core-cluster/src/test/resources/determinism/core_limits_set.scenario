@@ -1,0 +1,29 @@
+# The core limits record. Genesis runs on the defaults (TTL 900 000 ms, 256 requests per user, a ring of 65 536). A
+# CoreLimitsSet at version 1 sets the per-user cap to 3 and the TTL to 60 s: the fourth create and an amend are
+# TOO_MANY_PENDING_REQUESTS and are not remembered. Version 2 raises the cap: admitted. A resend is a DUPLICATE, a lower
+# version is STALE, a zero TTL is REJECTED. The record rides the snapshot: the same decisions after a restore, and the
+# config report carries it. Requests remembered under the 60 s TTL are gone 60 s later while the cap of the day stays.
+CLOCK 1700000000000
+V3GENESIS behavior=4
+GATE market=0 open=1
+DEPOSIT u=1 asset=0 amt=100000.0
+CONFIGREPORT corr=1                                                        # limits version 0, the defaults
+LIMITS ver=1 ttlMs=60000 cap=3 ring=65536 corr=2                           # ACCEPTED, ConfigApplied LIMITS
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=11           # order 1
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=2 corr=12           # order 2
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=3 corr=13           # order 3: the user holds 3 requests
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=4 corr=14           # TOO_MANY_PENDING_REQUESTS
+AMEND u=1 order=1 px=101.0 rid=5 corr=15                                   # TOO_MANY_PENDING_REQUESTS
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=16           # a stored id still answers: duplicate ack
+SNAPSHOT
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=4 corr=17           # the same decision after the restore
+LIMITS ver=1 ttlMs=60000 cap=3 ring=65536 corr=3                           # DUPLICATE
+LIMITS ver=1 ttlMs=60000 cap=9 ring=65536 corr=4                           # STALE (equal version, other values)
+LIMITS ver=2 ttlMs=0 cap=9 ring=65536 corr=5                               # REJECTED (TTL below 1)
+LIMITS ver=2 ttlMs=60000 cap=5 ring=65536 corr=6                           # ACCEPTED: cap 5
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=4 corr=18           # admitted: order 4
+CONFIGREPORT corr=7                                                        # limits version 2
+TICK 61000                                                                 # the 60 s TTL fires for rid 1..4
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=19           # rid 1 is new again: order 5
+SNAPSHOT
+CONFIGREPORT corr=8

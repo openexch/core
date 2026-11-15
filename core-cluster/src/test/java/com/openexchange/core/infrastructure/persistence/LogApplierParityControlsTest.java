@@ -50,6 +50,13 @@ public class LogApplierParityControlsTest {
         return first;
     }
 
+    private static byte[] positionsMasked(final ApplierArm arm) {
+        final org.agrona.ExpandableArrayBuffer buf = new org.agrona.ExpandableArrayBuffer();
+        final int length = BalanceSnapshotCodec.serialize(arm.engine(), buf, 0);
+        CoreApplyRunner.maskEventPositions(buf, 0, length);
+        return Arrays.copyOf(buf.byteArray(), length);
+    }
+
     @Test
     public void aStampOnlyDivergenceIsSeenAtTheFirstMessage() {
         final List<LogStep> log = LogApplierParityTest.parityLog(SEED);
@@ -69,7 +76,10 @@ public class LogApplierParityControlsTest {
         assertEquals("comparator blind to a stamp-only divergence", firstMessage, first);
         assertEquals("same events: the divergence was position only",
                 reference.sink.events().size(), shifted.sink.events().size());
-        assertTrue(Arrays.equals(reference.image(), shifted.image()));
+        // the state is identical; the only image bytes that differ are the log positions the event ring keeps with
+        // each retained order event (the ring replays an event with the position its broadcast carried)
+        assertTrue("the images are equal once the event positions are masked",
+                Arrays.equals(positionsMasked(reference), positionsMasked(shifted)));
         assertNotEquals(reference.engine().getLogPosition(), shifted.engine().getLogPosition());
     }
 

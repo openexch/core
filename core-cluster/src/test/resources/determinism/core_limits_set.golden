@@ -1,0 +1,46 @@
+ADMINACK corr=7001 ref=70 result=ADOPTED reason=0 cfg=1
+CONFIGAPPLIED kind=CORE market=0 version=1
+ADMINACK corr=7002 ref=70 result=ACCEPTED reason=0 cfg=2
+CONFIGAPPLIED kind=CORE market=0 version=2
+ADMINACK corr=7003 ref=70 result=ACCEPTED reason=0 cfg=3
+CONFIGAPPLIED kind=CORE market=0 version=3
+ADMINACK corr=7004 ref=70 result=ACCEPTED reason=0 cfg=4
+CONFIGAPPLIED kind=CORE market=0 version=4
+ADMINACK corr=0 ref=73 result=ACCEPTED reason=0 cfg=0
+ADMISSION market=0 gate=OPEN reason=ADMIN breaker=off broadcast
+DEPOSITACK corr=0 u=1 asset=0 amt=10000000000000 newAvail=10000000000000
+BALANCE u=1 asset=0 avail=10000000000000 locked=0
+CONFIGREPORT corr=1 cfg=4 behavior=4 limits=0 ttlMs=900000 cap=256 ring=65536 gate=0 reasons=0x0 markets=[1:BTC-USD base=1 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 2:ETH-USD base=2 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 3:SOL-USD base=3 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 4:XRP-USD base=4 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 5:DOGE-USD base=5 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0] assets=[0:USD/8, 1:BTC/8, 2:ETH/8, 3:SOL/8, 4:XRP/8, 5:DOGE/8]
+ADMINACK corr=2 ref=77 result=ACCEPTED reason=0 cfg=1
+CONFIGAPPLIED kind=LIMITS market=0 version=1
+BALANCE u=1 asset=0 avail=9990000000000 locked=10000000000
+MEDISPATCH seq=1 id=1/0 kind=CREATE u=1 order=1 old=0 market=1 type=0 side=0 px=10000000000 qty=100000000 budget=0 tif=0
+ORDERACK corr=11 order=1 u=1 market=1 status=PENDING_NEW dup=0 holdAsset=0 hold=10000000000 seq=1
+ORDEREVENT seq=1 order=1 u=1 market=1 kind=ACCEPTED status=PENDING_NEW reason=NONE px=10000000000 qty=100000000 filled=0 remaining=100000000 lastPx=0 lastQty=0 trade=0 leg=0 holdAsset=0 hold=10000000000 holdRemaining=10000000000
+BALANCE u=1 asset=0 avail=9980000000000 locked=20000000000
+MEDISPATCH seq=2 id=2/0 kind=CREATE u=1 order=2 old=0 market=1 type=0 side=0 px=10000000000 qty=100000000 budget=0 tif=0
+ORDERACK corr=12 order=2 u=1 market=1 status=PENDING_NEW dup=0 holdAsset=0 hold=10000000000 seq=2
+ORDEREVENT seq=2 order=2 u=1 market=1 kind=ACCEPTED status=PENDING_NEW reason=NONE px=10000000000 qty=100000000 filled=0 remaining=100000000 lastPx=0 lastQty=0 trade=0 leg=0 holdAsset=0 hold=10000000000 holdRemaining=10000000000
+BALANCE u=1 asset=0 avail=9970000000000 locked=30000000000
+MEDISPATCH seq=3 id=3/0 kind=CREATE u=1 order=3 old=0 market=1 type=0 side=0 px=10000000000 qty=100000000 budget=0 tif=0
+ORDERACK corr=13 order=3 u=1 market=1 status=PENDING_NEW dup=0 holdAsset=0 hold=10000000000 seq=3
+ORDEREVENT seq=3 order=3 u=1 market=1 kind=ACCEPTED status=PENDING_NEW reason=NONE px=10000000000 qty=100000000 filled=0 remaining=100000000 lastPx=0 lastQty=0 trade=0 leg=0 holdAsset=0 hold=10000000000 holdRemaining=10000000000
+ORDERREJECT corr=14 u=1 order=0 market=1 ref=50 reason=TOO_MANY_PENDING_REQUESTS detail=3
+ORDERREJECT corr=15 u=1 order=1 market=0 ref=52 reason=TOO_MANY_PENDING_REQUESTS detail=3
+ORDERACK corr=16 order=1 u=1 market=1 status=PENDING_NEW dup=1 holdAsset=0 hold=10000000000 seq=1
+ORDERREJECT corr=17 u=1 order=0 market=1 ref=50 reason=TOO_MANY_PENDING_REQUESTS detail=3
+ADMINACK corr=3 ref=77 result=DUPLICATE reason=0 cfg=1
+ADMINACK corr=4 ref=77 result=STALE reason=0 cfg=1
+ADMINACK corr=5 ref=77 result=REJECTED reason=15 cfg=1
+ADMINACK corr=6 ref=77 result=ACCEPTED reason=0 cfg=2
+CONFIGAPPLIED kind=LIMITS market=0 version=2
+BALANCE u=1 asset=0 avail=9960000000000 locked=40000000000
+MEDISPATCH seq=4 id=4/0 kind=CREATE u=1 order=4 old=0 market=1 type=0 side=0 px=10000000000 qty=100000000 budget=0 tif=0
+ORDERACK corr=18 order=4 u=1 market=1 status=PENDING_NEW dup=0 holdAsset=0 hold=10000000000 seq=4
+ORDEREVENT seq=4 order=4 u=1 market=1 kind=ACCEPTED status=PENDING_NEW reason=NONE px=10000000000 qty=100000000 filled=0 remaining=100000000 lastPx=0 lastQty=0 trade=0 leg=0 holdAsset=0 hold=10000000000 holdRemaining=10000000000
+CONFIGREPORT corr=7 cfg=4 behavior=4 limits=2 ttlMs=60000 cap=5 ring=65536 gate=0 reasons=0x0 markets=[1:BTC-USD base=1 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 2:ETH-USD base=2 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 3:SOL-USD base=3 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 4:XRP-USD base=4 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 5:DOGE-USD base=5 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0] assets=[0:USD/8, 1:BTC/8, 2:ETH/8, 3:SOL/8, 4:XRP/8, 5:DOGE/8]
+BALANCE u=1 asset=0 avail=9950000000000 locked=50000000000
+MEDISPATCH seq=5 id=5/0 kind=CREATE u=1 order=5 old=0 market=1 type=0 side=0 px=10000000000 qty=100000000 budget=0 tif=0
+ORDERACK corr=19 order=5 u=1 market=1 status=PENDING_NEW dup=0 holdAsset=0 hold=10000000000 seq=5
+ORDEREVENT seq=5 order=5 u=1 market=1 kind=ACCEPTED status=PENDING_NEW reason=NONE px=10000000000 qty=100000000 filled=0 remaining=100000000 lastPx=0 lastQty=0 trade=0 leg=0 holdAsset=0 hold=10000000000 holdRemaining=10000000000
+CONFIGREPORT corr=8 cfg=4 behavior=4 limits=2 ttlMs=60000 cap=5 ring=65536 gate=0 reasons=0x0 markets=[1:BTC-USD base=1 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 2:ETH-USD base=2 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 3:SOL-USD base=3 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 4:XRP-USD base=4 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0, 5:DOGE-USD base=5 quote=0 tick=1 min=1 max=1000000000000000 lot=0 minQty=1 maxQty=9223372036854775807 minNotional=0 maxNotional=9223372036854775807 risk=0 gate=0 reasons=0x0 breaker=0] assets=[0:USD/8, 1:BTC/8, 2:ETH/8, 3:SOL/8, 4:XRP/8, 5:DOGE/8]

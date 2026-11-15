@@ -34,6 +34,7 @@ import com.openexchange.core.infrastructure.generated.OrderEventBatchDecoder;
 import com.openexchange.core.infrastructure.generated.OrderEventDecoder;
 import com.openexchange.core.infrastructure.generated.SessionClass;
 import com.openexchange.core.infrastructure.persistence.CoreSbeDemuxer;
+import com.openexchange.core.infrastructure.persistence.CoreSbeDemuxerAccess;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.Test;
 
@@ -43,19 +44,107 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * (contract 4.1-4.4, 4.9, 8.1 assets): every block length, offset and enum value money-schema v7 freezes,
- * checked against the generated codecs; the v7 additions sit after the unchanged v6 prefix of each template; the
- * domain enums carry the wire codes; and a v6-shaped frame is refused by the exact v7 gate (schema reject, counted).
+ * Every block length, offset and enum value the money schema freezes, checked against the generated codecs. Version 8
+ * adds templates and one enum value and moves nothing: the v7 additions still sit after the unchanged v6 prefix of each
+ * template, the v8 templates are new ids, the domain enums carry the wire codes, and a frame of any other version is
+ * refused by the exact v8 gate (schema reject, counted).
  */
-public class MoneySchemaV7LayoutTest {
+public class MoneySchemaV8LayoutTest {
 
     private static final int HEADER = MessageHeaderEncoder.ENCODED_LENGTH;
 
     @Test
     public void schemaIdentity() {
         assertEquals(2, MessageHeaderDecoder.SCHEMA_ID);
-        assertEquals(7, MessageHeaderDecoder.SCHEMA_VERSION);
-        assertEquals("0.7", MessageHeaderDecoder.SEMANTIC_VERSION);
+        assertEquals(8, MessageHeaderDecoder.SCHEMA_VERSION);
+        assertEquals("0.8", MessageHeaderDecoder.SEMANTIC_VERSION);
+    }
+
+    /** Version 8: the gateway queries 54 to 56, the limits record 77 and the replies 115 to 118. */
+    @Test
+    public void gatewayQueryTemplates() {
+        final String g = "com.openexchange.core.infrastructure.generated.";
+        // {decoder, templateId, root block length}
+        final Object[][] roots = {
+            {"RequestOrderEventsDecoder", 54, 20}, {"RequestUserBalancesDecoder", 55, 16}, {"RequestCoreConfigDecoder", 56, 8},
+            {"CoreLimitsSetDecoder", 77, 28}, {"OrderEventsPageDecoder", 115, 8}, {"OrderEventsEndDecoder", 116, 36},
+            {"UserBalancesDecoder", 117, 25}, {"CoreConfigReportDecoder", 118, 49},
+        };
+        for (final Object[] row : roots) {
+            try {
+                final Class<?> c = Class.forName(g + row[0]);
+                assertEquals(row[0] + " templateId", row[1], c.getField("TEMPLATE_ID").get(null));
+                assertEquals(row[0] + " block length", row[2], c.getField("BLOCK_LENGTH").get(null));
+                assertEquals(row[0] + " is a v8 template", 8, c.getField("SCHEMA_VERSION").get(null));
+                // the ingress templates are in the demuxer's table; the replies are egress and are not
+                assertEquals(row[0] + " in the ingress table", (Integer) row[1] < 100 ? row[2] : (Object) (-1),
+                        CoreSbeDemuxerAccess.minimumBlockLength((Integer) row[1]));
+            } catch (final ReflectiveOperationException e) {
+                throw new AssertionError(row[0] + ": " + e);
+            }
+        }
+        // 54
+        assertEquals(0, com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder.correlationIdEncodingOffset());
+        assertEquals(8, com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder.fromEventSeqEncodingOffset());
+        assertEquals(16, com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder.maxEventsEncodingOffset());
+        // 55
+        assertEquals(8, com.openexchange.core.infrastructure.generated.RequestUserBalancesDecoder.userIdEncodingOffset());
+        // 77
+        assertEquals(8, com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder.configVersionEncodingOffset());
+        assertEquals(12, com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder.requestTtlMsEncodingOffset());
+        assertEquals(20, com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder.requestPerUserCapEncodingOffset());
+        assertEquals(24, com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder.orderEventRingCapacityEncodingOffset());
+        // 115: an entry is the OrderEvent block, field for field
+        assertEquals(OrderEventDecoder.BLOCK_LENGTH,
+                com.openexchange.core.infrastructure.generated.OrderEventsPageDecoder.EventsDecoder.sbeBlockLength());
+        assertEquals(167, OrderEventDecoder.BLOCK_LENGTH);
+        assertEquals(OrderEventBatchDecoder.EventsDecoder.sbeBlockLength(),
+                com.openexchange.core.infrastructure.generated.OrderEventsPageDecoder.EventsDecoder.sbeBlockLength());
+        final String[] eventFields = {"eventSeq", "logPosition", "orderId", "userId", "marketId", "eventKind", "status", "reason",
+            "side", "orderType", "timeInForce", "price", "stopPrice", "quantity", "filledQty", "remainingQty", "lastPrice",
+            "lastQty", "tradeId", "meOrderId", "holdAssetId", "holdAmount", "holdRemaining", "clientOrderIdHigh",
+            "clientOrderIdLow", "createdAtMs", "updatedAtMs", "meReason"};
+        for (final String f : eventFields) {
+            try {
+                assertEquals("115 entry field " + f + " sits where 102 has it",
+                        OrderEventDecoder.class.getMethod(f + "EncodingOffset").invoke(null),
+                        com.openexchange.core.infrastructure.generated.OrderEventsPageDecoder.EventsDecoder.class
+                                .getMethod(f + "EncodingOffset").invoke(null));
+            } catch (final ReflectiveOperationException e) {
+                throw new AssertionError(f + ": " + e);
+            }
+        }
+        assertEquals("115 at 44 entries fits the 8192 MTU", 7368, HEADER + 8 + 4 + 44 * 167);
+        // 116
+        assertEquals(8, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.countEncodingOffset());
+        assertEquals(12, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.firstAvailableSeqEncodingOffset());
+        assertEquals(20, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.lastSeqEncodingOffset());
+        assertEquals(28, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.nextFromSeqEncodingOffset());
+        // 117
+        assertEquals(16, com.openexchange.core.infrastructure.generated.UserBalancesDecoder.knownEncodingOffset());
+        assertEquals(17, com.openexchange.core.infrastructure.generated.UserBalancesDecoder.asOfLogPositionEncodingOffset());
+        assertEquals(20, com.openexchange.core.infrastructure.generated.UserBalancesDecoder.BalancesDecoder.sbeBlockLength());
+        // 118
+        assertEquals(8, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.configVersionEncodingOffset());
+        assertEquals(12, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.behaviorVersionEncodingOffset());
+        assertEquals(16, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.limitsVersionEncodingOffset());
+        assertEquals(20, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.requestTtlMsEncodingOffset());
+        assertEquals(28, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.requestPerUserCapEncodingOffset());
+        assertEquals(32, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.orderEventRingCapacityEncodingOffset());
+        assertEquals(36, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.gateStateEncodingOffset());
+        assertEquals(37, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.gateReasonsEncodingOffset());
+        assertEquals(41, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.asOfLogPositionEncodingOffset());
+        assertEquals(102, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.sbeBlockLength());
+        assertEquals(60, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.minQuantityEncodingOffset());
+        assertEquals(92, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.riskConfigVersionEncodingOffset());
+        assertEquals(96, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.gateStateEncodingOffset());
+        assertEquals(97, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.gateReasonsEncodingOffset());
+        assertEquals(101, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.circuitBreakerEncodingOffset());
+        assertEquals(13, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.AssetsDecoder.sbeBlockLength());
+        assertEquals("118 with five markets and four assets is one small frame", true, HEADER + 49 + 4 + 5 * 102 + 4 + 4 * 13 < 1408);
+        // the new ConfigKind value, wire and domain
+        assertEquals(4, com.openexchange.core.infrastructure.generated.ConfigKind.LIMITS.value());
+        assertEquals(4, com.openexchange.core.domain.ConfigKind.LIMITS.code());
     }
 
     /** 4.2: the ME feed templates, appended fields after the v6 block (101, 53, 124). */
@@ -238,10 +327,11 @@ public class MoneySchemaV7LayoutTest {
         assertTrue(GateReasonsDecoder.meBehavior(1 << 8));
     }
 
-    /** A v6 producer's frames (v6 header, v6 block lengths) are dropped by the exact v7 gate, counted, never decoded. */
+    /** A v6 or v7 producer's frames are dropped by the exact v8 gate, counted, never decoded. */
     @Test
     public void v6ShapedFramesAreSchemaRejects() {
         final CoreEngine engine = new CoreEngine();
+        engine.setEventSink(new com.openexchange.core.determinism.RecordingCoreSink());
         final CoreSbeDemuxer demuxer = new CoreSbeDemuxer(engine, new SettlementProjector(engine));
         final UnsafeBuffer buf = new UnsafeBuffer(new byte[512]);
         // {templateId, v6 root block}
@@ -257,9 +347,19 @@ public class MoneySchemaV7LayoutTest {
                 .correlationId(1).userId(1).assetId(0).amount(1).requestIdHigh(0).requestIdLow(0).encodedLength();
         buf.putShort(6, (short) 6, ByteOrder.LITTLE_ENDIAN);
         demuxer.dispatchTrusted(buf, 0, len, 1L);
-        assertEquals(5, demuxer.schemaRejectCount());
+        // the same well-formed deposit under a v7 header, and under a version this build has not heard of
+        buf.putShort(6, (short) 7, ByteOrder.LITTLE_ENDIAN);
+        demuxer.dispatchTrusted(buf, 0, len, 1L);
+        buf.putShort(6, (short) 9, ByteOrder.LITTLE_ENDIAN);
+        demuxer.dispatchTrusted(buf, 0, len, 1L);
+        assertEquals(7, demuxer.schemaRejectCount());
+        // and under its own version it is applied
+        buf.putShort(6, (short) 8, ByteOrder.LITTLE_ENDIAN);
+        demuxer.dispatchTrusted(buf, 0, len, 1L);
+        assertEquals(7, demuxer.schemaRejectCount());
+        assertEquals(1, engine.accountCount());
+        engine.account(1).available(0);
         assertEquals(0, demuxer.decodeRejectCount());
-        assertEquals(0, engine.accountCount());
     }
 
     /** The v6 fields of a v7 frame are where a v6 decoder reads them: the prefix bytes equal the v6 layout. */

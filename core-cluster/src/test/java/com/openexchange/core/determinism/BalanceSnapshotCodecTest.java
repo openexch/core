@@ -48,7 +48,7 @@ public class BalanceSnapshotCodecTest {
         CoreEngine orig = engineWithState();
         ExpandableArrayBuffer buf = new ExpandableArrayBuffer();
         int len = serialize(orig, buf);
-        assertEquals("the v5 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V5_TAG, buf.getLong(0));
+        assertEquals("the v6 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V6_TAG, buf.getLong(0));
 
         CoreEngine restored = new CoreEngine();
         BalanceSnapshotCodec.Decoded d = BalanceSnapshotCodec.deserialize(buf, 0, len, restored);
@@ -176,18 +176,28 @@ public class BalanceSnapshotCodecTest {
             // the serializer writes neither: walk the section headers
             final int count = buf.getInt(sectionCountOffset());
             int pos = sectionCountOffset() + 4;
+            int limitsAt = -1; // where section 13 starts: the reserved ids sit below it
             for (int i = 0; i < count; i++) {
                 final short id = buf.getShort(pos);
-                assertTrue("section " + id + " is below the reserved ids", id < BalanceSnapshotCodec.SECTION_FEED_STATE);
+                if (id == BalanceSnapshotCodec.SECTION_LIMITS) {
+                    limitsAt = pos;
+                }
+                assertTrue("section " + id + " is below the reserved ids, or the limits record or the event ring",
+                        id < BalanceSnapshotCodec.SECTION_FEED_STATE || id == BalanceSnapshotCodec.SECTION_LIMITS
+                                || id == BalanceSnapshotCodec.SECTION_ORDER_EVENT_RING);
                 pos += 6 + buf.getInt(pos + 2);
             }
             assertEquals("the walk covers the whole image", len, pos);
-            // an image carrying the reserved section (ascending, well-formed length) is refused
-            buf.putInt(sectionCountOffset(), count + 1);
+            assertTrue("layout v6 writes the limits record", limitsAt > 0);
+            // an image carrying the reserved section (ascending, well-formed length) is refused: spliced in before 13
             final int body = reserved == BalanceSnapshotCodec.SECTION_FEED_STATE ? 92 : 16; // well-formed heads: 92 and 16 bytes
-            buf.putShort(len, reserved);
-            buf.putInt(len + 2, body);
-            buf.setMemory(len + 6, body, (byte) 0);
+            final byte[] rest = new byte[len - limitsAt];
+            buf.getBytes(limitsAt, rest);
+            buf.putInt(sectionCountOffset(), count + 1);
+            buf.putShort(limitsAt, reserved);
+            buf.putInt(limitsAt + 2, body);
+            buf.setMemory(limitsAt + 6, body, (byte) 0);
+            buf.putBytes(limitsAt + 6 + body, rest);
             final int total = len + 6 + body;
             final IllegalStateException e = assertThrows(IllegalStateException.class,
                     () -> BalanceSnapshotCodec.deserialize(buf, 0, total, new CoreEngine()));
@@ -217,18 +227,30 @@ public class BalanceSnapshotCodecTest {
                 () -> BalanceSnapshotCodec.deserialize(buf, 0, len, new CoreEngine()));
     }
 
+    /** Layout v6: the limits record and the event ring are mandatory, so an image with no sections is not an image. */
     @Test
-    public void anImageWithNoSectionsIsAnEmptyLedger() {
+    public void anImageWithNoSectionsIsRefused() {
         ExpandableArrayBuffer buf = new ExpandableArrayBuffer();
         int p = 0;
-        buf.putLong(p, BalanceSnapshotCodec.LAYOUT_V5_TAG); p += 8;
+        buf.putLong(p, BalanceSnapshotCodec.LAYOUT_V6_TAG); p += 8;
         for (int i = 0; i < 7; i++) { buf.putLong(p, 0L); p += 8; }
         buf.putByte(p, (byte) 0); p += 1;
         buf.putInt(p, 0); p += 4;
+        final int length = p;
+        final IllegalStateException refused = assertThrows(IllegalStateException.class,
+                () -> BalanceSnapshotCodec.deserialize(buf, 0, length, new CoreEngine()));
+        assertTrue(refused.getMessage(), refused.getMessage().contains("no LIMITS section (13)"));
+    }
+
+    /** A genesis image (no account, the default limits record, an empty ring) restores to an empty ledger. */
+    @Test
+    public void aGenesisImageIsAnEmptyLedger() {
+        ExpandableArrayBuffer buf = new ExpandableArrayBuffer();
+        final int length = serialize(new CoreEngine(), buf);
         CoreEngine restored = new CoreEngine();
-        BalanceSnapshotCodec.Decoded d = BalanceSnapshotCodec.deserialize(buf, 0, p, restored);
+        BalanceSnapshotCodec.Decoded d = BalanceSnapshotCodec.deserialize(buf, 0, length, restored);
         assertEquals(0, restored.accountCount());
-        assertEquals(p, d.bytesConsumed);
+        assertEquals(length, d.bytesConsumed);
     }
 
     /** Offset of {@code sectionCount}: tag (8) + 7 scalars (56) + flags (1). */

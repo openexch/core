@@ -32,7 +32,8 @@ public sealed interface CoreEngineEvent
         CoreEngineEvent.OrderFault, CoreEngineEvent.OrderSnapshotEntry, CoreEngineEvent.OrderSnapshotEnd,
         CoreEngineEvent.PendingDispatchEnd, CoreEngineEvent.MeDispatchReply,
         CoreEngineEvent.FeedLatch, CoreEngineEvent.FeedLatchCleared, CoreEngineEvent.ReleaseEffect,
-        CoreEngineEvent.GateAutoReopen {
+        CoreEngineEvent.GateAutoReopen, CoreEngineEvent.OrderEventReplay, CoreEngineEvent.OrderEventsEnd,
+        CoreEngineEvent.UserBalances, CoreEngineEvent.CoreConfigReport {
 
     String render();
 
@@ -362,6 +363,54 @@ public sealed interface CoreEngineEvent
         public String render() {
             return String.format("AUTOREOPEN jseq=%d opened=%d reasons=0x%x laneHalts=%d", journalSeq, opened ? 1 : 0, gateReasons,
                     laneHalts);
+        }
+    }
+
+    // ---- gateway query replies ----
+
+    /**
+     * One replayed order event of a RequestOrderEvents reply. {@code recordHex} is the retained record, byte for byte
+     * (the wire OrderEvent body); the rendered fields are decoded from it.
+     */
+    record OrderEventReplay(long correlationId, long eventSeq, long logPosition, long orderId, long userId, int marketId,
+                            String kind, String status, String reason, long price, long quantity, long filledQty,
+                            long remainingQty, long lastPrice, long lastQty, long tradeId, long meOrderId, int holdAssetId,
+                            long holdAmount, long holdRemaining, int meReason, String recordHex) implements CoreEngineEvent {
+        @Override
+        public String render() {
+            return String.format("ORDEREVENTREPLAY corr=%d seq=%d order=%d u=%d market=%d kind=%s status=%s reason=%s px=%d qty=%d filled=%d remaining=%d lastPx=%d lastQty=%d trade=%d leg=%d holdAsset=%d hold=%d holdRemaining=%d",
+                    correlationId, eventSeq, orderId, userId, marketId, kind, status, reason, price, quantity, filledQty,
+                    remainingQty, lastPrice, lastQty, tradeId, meOrderId, holdAssetId, holdAmount, holdRemaining)
+                    + (meReason == 255 ? "" : " meReason=" + meReason);
+        }
+    }
+
+    record OrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq)
+            implements CoreEngineEvent {
+        @Override
+        public String render() {
+            return String.format("ORDEREVENTSEND corr=%d n=%d first=%d last=%d next=%d", correlationId, count, firstAvailableSeq,
+                    lastSeq, nextFromSeq);
+        }
+    }
+
+    /** {@code lines}: {@code asset:available/locked} per nonzero asset, ascending, space separated. */
+    record UserBalances(long correlationId, long userId, boolean known, String lines) implements CoreEngineEvent {
+        @Override
+        public String render() {
+            return String.format("USERBALANCES corr=%d u=%d known=%d balances=[%s]", correlationId, userId, known ? 1 : 0, lines);
+        }
+    }
+
+    /** {@code markets} and {@code assets} are rendered rows, ascending id. */
+    record CoreConfigReport(long correlationId, long configVersion, long behaviorVersion, long limitsVersion, long requestTtlMs,
+                            int requestPerUserCap, int orderEventRingCapacity, int gateStateCode, int gateReasons,
+                            java.util.List<String> markets, java.util.List<String> assets) implements CoreEngineEvent {
+        @Override
+        public String render() {
+            return String.format("CONFIGREPORT corr=%d cfg=%d behavior=%d limits=%d ttlMs=%d cap=%d ring=%d gate=%d reasons=0x%x markets=%s assets=%s",
+                    correlationId, configVersion, behaviorVersion, limitsVersion, requestTtlMs, requestPerUserCap,
+                    orderEventRingCapacity, gateStateCode, gateReasons, markets, assets);
         }
     }
 }

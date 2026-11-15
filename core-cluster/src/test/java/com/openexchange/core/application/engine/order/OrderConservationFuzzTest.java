@@ -83,4 +83,47 @@ public class OrderConservationFuzzTest {
                 + roundTrips, releases > 100 && capacity > 0 && invalid > 0 && released > 0 && legLive > 0 && legZero > 0
                 && roundTrips > 0);
     }
+
+    // ---------------------------------------------------------------- behaviour 4: retries across gate closes and deadlines
+
+    /**
+     * Behaviour 4 against the same reference ME, with the retry verbs on: retried requestIds interleaved with ADMIN closes of
+     * the market and GLOBAL gates and with jumps past GTD deadlines. The same invariant set runs after every apply, the same
+     * drain and ledger check close each seed, and every retry of a remembered requestId mints nothing, creates nothing,
+     * moves no balance and is answered with exactly the stored decision.
+     */
+    @Test
+    public void v4SeedsWithRetriesAcrossGateClosesAndGtdDeadlinesHoldTheInvariants() {
+        runRetrySeeds(4);
+    }
+
+    /** The same verbs at behaviour 3: the conservation set holds there too (the answer may differ, nothing is created). */
+    @Test
+    public void v3SeedsWithRetriesAcrossGateClosesAndGtdDeadlinesHoldTheInvariants() {
+        runRetrySeeds(3);
+    }
+
+    private static void runRetrySeeds(final long behavior) {
+        long checked = 0, underClosedGate = 0, pastDeadline = 0, closes = 0, leaks = 0, roundTrips = 0;
+        for (long seed = 201; seed <= 206; seed++) {
+            final V3CoreFuzzDriver d = new V3CoreFuzzDriver(seed, true, behavior, true);
+            org.junit.Assert.assertEquals("precondition: the recorded behaviour", behavior,
+                    d.r.engine.coreConfig().behaviorVersion());
+            d.run(400);
+            d.drainAndCheckLedger();
+            checked += d.retriesChecked;
+            underClosedGate += d.retriesUnderClosedGate;
+            pastDeadline += d.retriesPastDeadline;
+            closes += d.gateCloses;
+            leaks += d.flaggedLeaks();
+            roundTrips += d.roundTrips;
+        }
+        System.out.println("[retry-fuzz] behaviour " + behavior + " seeds 201-206 x 400 steps: retriesChecked=" + checked
+                + " underClosedGate=" + underClosedGate + " pastGtdDeadline=" + pastDeadline + " gateCloses=" + closes
+                + " roundTrips=" + roundTrips + " flaggedLedgerLeaks=" + leaks);
+        org.junit.Assert.assertEquals("no flagged order dies owning an ME ledger entry", 0L, leaks);
+        org.junit.Assert.assertTrue("the retry verbs were exercised: retries " + checked + " under a closed gate " + underClosedGate
+                + " past a GTD deadline " + pastDeadline + " gate closes " + closes,
+                checked > 50 && underClosedGate > 0 && pastDeadline > 0 && closes > 0);
+    }
 }

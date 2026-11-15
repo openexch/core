@@ -94,6 +94,24 @@ public final class V3Rig implements CoreSbeDemuxer.TransportHooks {
         return r;
     }
 
+    /** {@link #open()} then one CoreConfig step per behaviour above 3, up to {@code behavior}. */
+    public static V3Rig openAt(final long behavior) {
+        final V3Rig r = open();
+        for (long v = 4; v <= behavior; v++) {
+            r.engine.applyCoreConfig(V3Genesis.config(v, v), r.now);
+        }
+        if (r.engine.coreConfig().behaviorVersion() != behavior) {
+            throw new AssertionError("behaviour " + behavior + " was not recorded: " + r.engine.coreConfig().behaviorVersion());
+        }
+        return r;
+    }
+
+    /** Copy an encoded frame into the rig buffer; returns its length. */
+    public int load(final byte[] frame) {
+        buf.putBytes(0, frame);
+        return frame.length;
+    }
+
     /** Behaviour 3 bound by a FRESH record with ME ledger capacity {@code capacity}, GLOBAL opened. */
     public static V3Rig openWithCapacity(final long capacity) {
         final V3Rig r = unbound();
@@ -123,7 +141,7 @@ public final class V3Rig implements CoreSbeDemuxer.TransportHooks {
         final org.agrona.ExpandableArrayBuffer buf = new org.agrona.ExpandableArrayBuffer();
         final int len = com.openexchange.core.infrastructure.persistence.BalanceSnapshotCodec.serialize(engine, buf, 0);
         final V3Rig f = new V3Rig();
-        f.engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        f.engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         com.openexchange.core.infrastructure.persistence.BalanceSnapshotCodec.deserialize(buf, 0, len, f.engine);
         f.engine.verifyRestoredInvariants();
         f.now = now;

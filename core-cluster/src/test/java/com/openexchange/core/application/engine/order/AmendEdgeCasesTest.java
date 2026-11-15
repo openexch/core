@@ -284,21 +284,21 @@ public class AmendEdgeCasesTest {
         r.setRisk(cfg);
         final AmendSupport s = new AmendSupport(r).buyBase(true); // decision 1 of 256: the accepted create
         assertEquals(1, r.orders.requests().countFor(1));
-        for (int i = 1; i < RequestTable.PER_USER_CAP; i++) {
+        for (int i = 1; i < RequestTable.DEFAULT_PER_USER_CAP; i++) {
             r.markNow();
             r.create(r.limit(1, 1, 0, ONE, ONE)); // 1 x 1 = notional 1 < 50: refused after the rate check, so stored
             assertEquals("create " + i + " is a stored NOTIONAL_TOO_SMALL", CoreRejectReason.NOTIONAL_TOO_SMALL, r.reject().reason());
         }
-        assertEquals("the table is full", RequestTable.PER_USER_CAP, r.orders.requests().countFor(1));
+        assertEquals("the table is full", RequestTable.DEFAULT_PER_USER_CAP, r.orders.requests().countFor(1));
         assertEquals("the rejects created no order", 1, r.orders.orders().size());
         final int secBefore = r.orders.user(1).secCount;
         r.markNow();
         final AmendOrderCommand c = s.amend(1, 1, PRICE, 2 * ONE); // fresh requestId
         assertEquals(CoreRejectReason.TOO_MANY_PENDING_REQUESTS, s.rejectOnly("amend over a full request table"));
-        assertEquals("detail = the user's count", RequestTable.PER_USER_CAP, r.first(CoreEngineEvent.OrderReject.class).detail());
+        assertEquals("detail = the user's count", RequestTable.DEFAULT_PER_USER_CAP, r.first(CoreEngineEvent.OrderReject.class).detail());
         assertUntouched(s, "per-user cap");
         assertNull("not stored: the cap reject is decided before the rate check", r.orders.requests().get(1, c.requestIdHigh, c.requestIdLow));
-        assertEquals(RequestTable.PER_USER_CAP, r.orders.requests().countFor(1));
+        assertEquals(RequestTable.DEFAULT_PER_USER_CAP, r.orders.requests().countFor(1));
         assertEquals("no rate unit consumed", secBefore, r.orders.user(1).secCount);
         r.markNow();
         s.amend(1, 42, PRICE, 2 * ONE);

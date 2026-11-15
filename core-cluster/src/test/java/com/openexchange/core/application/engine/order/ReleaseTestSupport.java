@@ -194,7 +194,7 @@ public final class ReleaseTestSupport {
     /** Restore {@code image} into a fresh widened engine and run the restore invariants. */
     public static CoreEngine restore(final byte[] image) {
         final CoreEngine e = new CoreEngine();
-        e.coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        e.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         e.setEventSink(new RecordingCoreSink());
         BalanceSnapshotCodec.deserialize(new UnsafeBuffer(image), 0, image.length, e);
         e.verifyRestoredInvariants();

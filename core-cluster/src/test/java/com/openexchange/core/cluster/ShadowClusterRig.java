@@ -739,6 +739,111 @@ final class ShadowClusterRig implements AutoCloseable {
         return live != AeronArchive.NULL_POSITION ? live : archive.getStopPosition(rec);
     }
 
+    // ---------------------------------------------------------------- the event ring and the limits record
+
+    /** The ring capacity {@link #wrapEventRing} records, and the creates it sends: the ring wraps more than once. */
+    static final int SMALL_EVENT_RING = 8;
+    static final int RING_ORDERS = 20;
+
+    /**
+     * The limits record (a ring of {@link #SMALL_EVENT_RING}, a 10 min TTL, a cap of 200), the global gate opened, and
+     * {@link #RING_ORDERS} accepted creates from a registered GATEWAY session, one event each: the ring holds the newest
+     * {@link #SMALL_EVENT_RING} and has wrapped. Users 1 to 5 must hold USD already (the rig's deposits fund them).
+     */
+    Client wrapEventRing(final Client admin, final Member host) throws InterruptedException {
+        final CoreRestoreRig.Encoders enc = new CoreRestoreRig.Encoders();
+        admin.offer(enc.buf, enc.limits(0x77L, 1, 600_000L, 200, SMALL_EVENT_RING));
+        await(() -> admin.in.count(f -> f.startsWith("ADMINACK ref=77 result=ACCEPTED")) > 0, OP_TIMEOUT_MS,
+                () -> "the limits record must be ACCEPTED; frames " + admin.in.frames);
+        admin.offer(enc.buf, enc.gateOpen(0x73L));
+        await(() -> admin.in.count(f -> f.startsWith("ADMINACK ref=73 result=ACCEPTED")) > 0, OP_TIMEOUT_MS,
+                () -> "the ADMIN OPEN must be ACCEPTED; frames " + admin.in.frames);
+        final Client gateway = connect(SessionClass.GATEWAY, host);
+        CoreRestoreRig.register(gateway.session, SessionClass.GATEWAY, false, false, sessions());
+        final long one = 100_000_000L;
+        for (int i = 0; i < RING_ORDERS; i++) {
+            gateway.offer(enc.buf, enc.limit(0x5000L + i, 1 + (i % 5), 0x5000L + i, 1, true, one / 10, one,
+                    com.openexchange.core.infrastructure.generated.TimeInForce.GTC, 0L));
+        }
+        await(() -> gateway.in.acks + gateway.in.rejects >= RING_ORDERS, OP_TIMEOUT_MS,
+                () -> "every create must be answered: acks " + gateway.in.acks + " rejects " + gateway.in.rejects);
+        if (gateway.in.rejects != 0) {
+            throw new AssertionError("the ring story needs " + RING_ORDERS + " accepted creates, first reject "
+                    + gateway.in.firstReject);
+        }
+        return gateway;
+    }
+
+    private static int templateOf(final String tapped) {
+        final String hex = tapped.substring(tapped.lastIndexOf('/') + 1);
+        return Integer.parseInt(hex.substring(6, 8) + hex.substring(4, 6), 16);
+    }
+
+    /** The tapped frames of the replay reply (115, 116) and the config report (118), in emission order. */
+    static List<String> queryReplies(final List<String> tapped) {
+        final List<String> out = new ArrayList<>();
+        synchronized (tapped) {
+            for (final String f : tapped) {
+                final int t = templateOf(f);
+                if (t == 115 || t == 116 || t == 118) {
+                    out.add(f);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * After a restore: the replay of the wrapped ring (a page, an overrun and a head probe) and the config report are
+     * asked once through the log, and every member answers in its own apply (the egress tap sees a follower's frames
+     * too). The frames {@code restored} emits must equal, byte for byte, the frames of {@code reference}, a member
+     * that never restarted. Fails with {@code replies differ after restore}.
+     */
+    void assertRepliesEqualAfterRestore(final Member reference, final Member restored, final Client admin, final String label) {
+        final List<String> a = ServiceProbe.tapEgress(reference.service);
+        final List<String> b = ServiceProbe.tapEgress(restored.service);
+        try {
+            final CoreRestoreRig.Encoders enc = new CoreRestoreRig.Encoders();
+            admin.offer(enc.buf, enc.orderEvents(0x541L, RING_ORDERS - SMALL_EVENT_RING, 100));
+            admin.offer(enc.buf, enc.orderEvents(0x542L, 0, 100));
+            admin.offer(enc.buf, enc.orderEvents(0x543L, 0, 0));
+            admin.offer(enc.buf, enc.coreConfigRequest(0x561L));
+            await(() -> queryReplies(a).size() >= 5 && queryReplies(b).size() >= 5, 30_000,
+                    () -> label + ": the reference emitted " + queryReplies(a).size() + " reply frames, the restored member "
+                            + queryReplies(b).size());
+            pumpMs(200);
+        } finally {
+            ServiceProbe.untapEgress(reference.service);
+            ServiceProbe.untapEgress(restored.service);
+        }
+        final List<String> ra = queryReplies(a);
+        final List<String> rb = queryReplies(b);
+        if (!ra.equals(rb)) {
+            throw new AssertionError("replies differ after restore (" + label + "): reference " + ra + " restored " + rb);
+        }
+        int pages = 0;
+        int ends = 0;
+        int reports = 0;
+        for (final String f : ra) {
+            final int t = templateOf(f);
+            pages += t == 115 ? 1 : 0;
+            ends += t == 116 ? 1 : 0;
+            reports += t == 118 ? 1 : 0;
+        }
+        if (pages != 1 || ends != 3 || reports != 1) {
+            throw new AssertionError(label + ": expected one page, three terminators and one report, got " + ra);
+        }
+        // the page carries the whole wrapped ring: header 8, correlation 8, group header 4, then the entries
+        final String page = ra.get(0).substring(ra.get(0).lastIndexOf('/') + 1);
+        final int entries = (page.length() / 2 - 20) / 167;
+        if (entries != SMALL_EVENT_RING) {
+            throw new AssertionError(label + ": the page holds " + entries + " events, the wrapped ring holds "
+                    + SMALL_EVENT_RING);
+        }
+        System.out.println("[ring] " + label + ": replay and config report byte-equal on member " + reference.id + " and restored "
+                + "member " + restored.id + " (" + ra.size() + " frames, " + entries + " events)");
+    }
+
     /** The nonce {@link #adopt} ADOPTs: {@link #GENESIS} unless a re-genesis test sets another. */
     long adoptGenesis = GENESIS;
 

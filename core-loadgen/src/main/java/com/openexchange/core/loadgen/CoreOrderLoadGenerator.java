@@ -65,9 +65,9 @@ import java.util.concurrent.TimeUnit;
  */
 public final class CoreOrderLoadGenerator {
 
-    /** The core's requestId table TTL (equal to {@code RequestTable.TTL_MS}; a core test asserts it). */
+    /** The core's requestId table TTL (equal to {@code RequestTable.DEFAULT_TTL_MS}; a core test asserts it). */
     public static final long REQUEST_TTL_MS = 15 * 60_000L;
-    /** The core's per-user requestId cap (equal to {@code RequestTable.PER_USER_CAP}; a core test asserts it). */
+    /** The core's per-user requestId cap (equal to {@code RequestTable.DEFAULT_PER_USER_CAP}; a core test asserts it). */
     public static final int REQUESTS_PER_USER_CAP = 256;
     /** Fixed-point scale of prices and quantities (8 decimals). */
     public static final long ONE = 100_000_000L;

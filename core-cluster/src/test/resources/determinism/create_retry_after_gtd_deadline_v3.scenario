@@ -1,0 +1,14 @@
+# Behaviour 3 control for the create retry across a GTD deadline: the expiry check runs before the requestId lookup,
+# so the retry of an accepted GTD create after its deadline is answered EXPIRED although the order was accepted and is
+# still live (its cancel waits for the engine's acknowledgement). This file is the recorded behaviour 3 log: its golden
+# must never change.
+CLOCK 1700000000000
+V3GENESIS
+GATE market=0 open=1
+DEPOSIT u=1 asset=0 amt=100000.0
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=21   # accepted: order 1
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=22   # before the deadline: duplicate ack
+TICK 2000                                                                                  # the deadline fires
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=23   # after the deadline: EXPIRED
+SNAPSHOT
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=24   # the same after a restore

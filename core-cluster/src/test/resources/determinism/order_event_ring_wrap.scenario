@@ -1,0 +1,43 @@
+# The order-event replay ring. A ring of 4 takes seven events (five accepted creates, a cancel of an armed stop, an
+# expiry): events 1 to 3 leave it. A replay from 0 is an overrun (the terminator alone, firstAvailable 4); from 3 the
+# four newest come back; a page of 2 continues by its cursor; the head probe and a negative page are answered without a
+# visit. A snapshot carries the wrapped ring: the same replies after a restore. Shrinking to 2 keeps the newest two,
+# growing keeps them and takes new events, and capacity 0 switches the replay off.
+CLOCK 1700000000000
+V3GENESIS behavior=4
+GATE market=0 open=1
+LIMITS ver=1 ttlMs=900000 cap=256 ring=4 corr=1
+DEPOSIT u=1 asset=0 amt=100000.0
+DEPOSIT u=2 asset=1 amt=10.0
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1                       # event 1
+CREATE u=1 market=1 side=0 type=0 px=101.0 qty=1.0 rid=2                       # event 2
+CREATE u=2 market=1 side=1 type=4 px=90.0 qty=1.0 stop=95.0 rid=3              # event 3: an armed STOP_LIMIT (order 3)
+CREATE u=1 market=1 side=0 type=0 px=102.0 qty=1.0 rid=4                       # event 4
+CANCEL u=2 order=3 rid=5                                                       # event 5: the armed stop ends CANCELLED
+CREATE u=1 market=1 side=0 type=0 px=103.0 qty=1.0 rid=6                       # event 6
+CREATE u=1 market=1 side=0 type=0 px=104.0 qty=1.0 rid=7                       # event 7
+ORDEREVENTS from=0 max=100 corr=10                                             # overrun: END n=0 first=4 last=7
+ORDEREVENTS from=3 max=100 corr=11                                             # events 4..7
+ORDEREVENTS from=3 max=2 corr=12                                               # events 4, 5; next=5
+ORDEREVENTS from=5 max=2 corr=13                                               # events 6, 7; next=7 = last
+ORDEREVENTS from=7 max=2 corr=14                                               # nothing newer
+ORDEREVENTS from=0 max=0 corr=15                                               # head probe
+ORDEREVENTS from=0 max=-1 corr=16                                              # INVALID naming 54
+SNAPSHOT
+ORDEREVENTS from=3 max=100 corr=20                                             # the same four after the restore
+CREATE u=1 market=1 side=0 type=0 px=105.0 qty=1.0 rid=8                       # event 8: event 4 leaves
+ORDEREVENTS from=3 max=100 corr=21                                             # overrun now: first=5
+ORDEREVENTS from=4 max=100 corr=22                                             # events 5..8
+LIMITS ver=2 ttlMs=900000 cap=256 ring=2 corr=2                                # shrink: the newest two stay
+ORDEREVENTS from=6 max=100 corr=23                                             # events 7, 8
+LIMITS ver=3 ttlMs=900000 cap=256 ring=6 corr=3                                # grow: nothing is lost
+CREATE u=1 market=1 side=0 type=0 px=106.0 qty=1.0 rid=9                       # event 9
+ORDEREVENTS from=6 max=100 corr=24                                             # events 7, 8, 9
+SNAPSHOT
+ORDEREVENTS from=6 max=100 corr=25
+LIMITS ver=4 ttlMs=900000 cap=256 ring=0 corr=4                                # replay off
+CREATE u=1 market=1 side=0 type=0 px=107.0 qty=1.0 rid=10                      # event 10, not kept
+ORDEREVENTS from=9 max=100 corr=26                                             # overrun: first=11 last=10
+ORDEREVENTS from=10 max=100 corr=27                                            # at the head
+SNAPSHOT
+ORDEREVENTS from=9 max=100 corr=28

@@ -185,7 +185,7 @@ public class FeedHarnessNegativeControlsTest {
     /** Characterisation, not a RED: the TRUSTED_FEED seam also changes the image of the re-homed v3 story. */
     @Test
     public void trustedFeedIsVisibleInTheReproducedImage() {
-        red(FeedHarnessSeams.TRUSTED_FEED, "snapshotSha256 equals FrameReplica.image()",
+        red(FeedHarnessSeams.TRUSTED_FEED, "image equals FrameReplica.image()",
                 () -> com.openexchange.core.infrastructure.persistence.CoreApplyRunnerTest.reproduces(1));
     }
 

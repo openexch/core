@@ -78,7 +78,7 @@ abstract class SyntheticFuzzHarness {
 
     /** What admission must refuse for a structurally valid create, in chain order (requestId cap, slot, hold), or null. */
     CoreRejectReason predictReject(final long u, final int holdAsset, final long hold) {
-        if (r.orders.requests().countFor(u) >= RequestTable.PER_USER_CAP) {
+        if (r.orders.requests().countFor(u) >= RequestTable.DEFAULT_PER_USER_CAP) {
             return CoreRejectReason.TOO_MANY_PENDING_REQUESTS;
         }
         if (r.orders.orders().openCount(u) >= r.orders.market(MKT).maxOpenOrders) {

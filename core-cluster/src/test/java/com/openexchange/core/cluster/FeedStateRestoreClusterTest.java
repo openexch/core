@@ -196,7 +196,7 @@ public class FeedStateRestoreClusterTest {
         TestAuth.install();
         final CoreClusteredService service = new CoreClusteredService();
         // the jar ships {1, 2}: every instance (the cold-restarted one included) is widened through the seam
-        service.engine().coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        service.engine().coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, PORT_BASE, service);
         cfg.baseDir(baseDir);
         cfg.aeronDirectoryName(aeronDir);

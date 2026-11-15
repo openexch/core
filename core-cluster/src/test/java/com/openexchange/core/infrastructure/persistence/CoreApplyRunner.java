@@ -59,7 +59,12 @@ public final class CoreApplyRunner implements AutoCloseable {
     public record Report(long correlationId, long meEpoch, long lastAppliedJournalSeq, boolean feedHalted, int haltReason,
                          long consumePosition, long lastAppliedTradeId, byte[] frame) { }
 
-    /** 6.1 Result. */
+    /**
+     * 6.1 Result. {@code snapshotSha256} is the sha256 of {@link #digestImage()}: the snapshot image with the logPosition
+     * of every retained order event zeroed. It is not the digest of the production image ({@link #image()}), which also
+     * depends on the log positions the core applied at. Compare it only with other harness digests, never with the
+     * digest of an image a cluster member wrote.
+     */
     public record Result(String snapshotSha256, long lastAppliedJournalSeq, long boundMeEpoch, long lastAppliedTradeId,
                          long consumePosition, String latchReason, long latchExpected, long latchSeen, long latchSkip,
                          int globalGateReasons, Map<String, Long> counters, boolean invariantsHold, boolean applyFailed,
@@ -319,8 +324,51 @@ public final class CoreApplyRunner implements AutoCloseable {
         return bytes;
     }
 
+    /**
+     * The image the snapshot digest is taken over: {@link #image()} with the log position of every retained order
+     * event set to zero. The event ring keeps each event with the position of the log entry that produced it, which
+     * is a property of the log this core applied and not of the state the feed produced: a feed delivered with
+     * duplicates or a restart has more entries, so later positions, than a clean one. With the positions masked, two
+     * runs end in the same digest exactly when they end in the same state and the same retained events. This is the
+     * image {@link Result#snapshotSha256()} digests, so that value is NOT the digest of the production image.
+     */
+    public byte[] digestImage() {
+        final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(64 * 1024);
+        final int offset = SnapshotEnvelope.payloadOffset();
+        final int payloadLength = BalanceSnapshotCodec.serialize(engine, buffer, offset);
+        maskEventPositions(buffer, offset, payloadLength);
+        final int length = new SnapshotEnvelope().seal(buffer, payloadLength);
+        final byte[] bytes = new byte[length];
+        buffer.getBytes(0, bytes);
+        return bytes;
+    }
+
+    /**
+     * Zero the logPosition of every record of the event ring section of a snapshot payload, in place. Only the harness
+     * digest uses this; production images keep the positions (the stream stitch needs them).
+     */
+    public static void maskEventPositions(final org.agrona.MutableDirectBuffer payload, final int offset, final int length) {
+        int p = offset + 8 + 7 * 8 + 1;
+        final int sections = payload.getInt(p);
+        p += 4;
+        for (int i = 0; i < sections && p < offset + length; i++) {
+            final int id = payload.getShort(p);
+            final int body = payload.getInt(p + 2);
+            if (id == BalanceSnapshotCodec.SECTION_ORDER_EVENT_RING) {
+                final int records = payload.getInt(p + 6 + 12);
+                final int first = p + 6 + BalanceSnapshotCodec.ORDER_EVENT_RING_HEAD_BYTES;
+                final int logPositionAt = com.openexchange.core.infrastructure.generated.OrderEventDecoder.logPositionEncodingOffset();
+                for (int r = 0; r < records; r++) {
+                    payload.putLong(first + r * com.openexchange.core.infrastructure.generated.OrderEventDecoder.BLOCK_LENGTH
+                            + logPositionAt, 0L);
+                }
+            }
+            p += 6 + body;
+        }
+    }
+
     public Result result() {
-        final byte[] image = image();
+        final byte[] image = digestImage();
         final FeedState f = engine.feed();
         final Map<String, Long> c = new LinkedHashMap<>();
         for (final int t : new int[] {61, 62, 63, 64, 67, 68}) {

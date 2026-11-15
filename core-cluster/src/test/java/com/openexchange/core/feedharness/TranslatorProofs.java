@@ -257,8 +257,10 @@ public final class TranslatorProofs {
                 case 68 -> 39;
                 default -> -1;
             };
-            final byte[] head = {(byte) block, (byte) (block >>> 8), (byte) t, 0, 2, 0, 7, 0};
-            assertArrayEquals(what + ": out[0, 8) of a " + t + " is {" + block + ", " + t + ", 2, 7}", head,
+            // the money wire version is this build's (the exact-version gate of the core it feeds)
+            final int version = com.openexchange.core.infrastructure.generated.MessageHeaderEncoder.SCHEMA_VERSION;
+            final byte[] head = {(byte) block, (byte) (block >>> 8), (byte) t, 0, 2, 0, (byte) version, 0};
+            assertArrayEquals(what + ": out[0, 8) of a " + t + " is {" + block + ", " + t + ", 2, " + version + "}", head,
                     Arrays.copyOf(f, 8));
             final int n = expected.get(k)[1];
             switch (t) {
