@@ -67,6 +67,9 @@ public final class OrderEngine {
     private static final int T_ORDER_SNAPSHOT = 53;
     private static final int T_QUARANTINE = 74;
     private static final int T_PENDING_DISPATCH = 65;
+    private static final int T_ORDER_EVENTS = 54;
+    /** RequestOrderEvents page cap: a larger maxEvents is clamped, so one reply stays far below a session's egress ceiling. */
+    public static final int ORDER_EVENTS_CAP = 4096;
     /** Replace window observability deadline (lifecycle B5, D6): no state change when it fires. */
     public static final long REPLACE_DEADLINE_MS = 10_000L;
     /** RequestOrderSnapshot page cap (contract 3.6). */
@@ -111,6 +114,9 @@ public final class OrderEngine {
     private final CoreEngine ledger;
     private final OrderStore orders = new OrderStore();
     private final RequestTable requests = new RequestTable();
+    /** The newest order events for RequestOrderEvents (replicated, snapshotted). Capacity follows the limits record. */
+    private final OrderEventRing eventRing = new OrderEventRing(
+            com.openexchange.core.application.engine.config.CoreLimits.DEFAULT_ORDER_EVENT_RING_CAPACITY);
     private final MarketRisk[] markets = new MarketRisk[UserRisk.MARKET_SLOTS];
     private final Long2ObjectHashMap<UserRisk> users = new Long2ObjectHashMap<>();
     private long[] userScratch = new long[256];
@@ -216,6 +222,16 @@ public final class OrderEngine {
         final long now = ledger.getLastLogTime();
         final CoreEventSink sink = ledger.eventSink();
 
+        // Behaviour 4: a retried create always gets its stored decision. With a requestId and a real user the lookup
+        // runs first, before the market, shape, time-in-force, flags, expiry, gate and tick/lot/band checks: a hit answers
+        // exactly as the later lookup would (mismatch, stored reject, or the duplicate ack) and a miss falls through to the
+        // checks below in their order. Below behaviour 4 the lookup keeps its old place (step 0b), so a log recorded there
+        // replays as recorded.
+        final boolean lookupFirst = v4() && c.userId > 0 && (c.requestIdHigh != 0 || c.requestIdLow != 0);
+        if (lookupFirst && replayStoredCreate(sink, c, now)) {
+            return;
+        }
+
         // 0. structure + gate: input errors and operations create no user state and consume no budget
         if (c.marketId < 1 || c.marketId > MARKETS) {
             reject(sink, c, CoreRejectReason.UNKNOWN_MARKET, c.marketId, now, false);
@@ -274,24 +290,12 @@ public final class OrderEngine {
             return;
         }
 
-        // 0b. requestId: a replay returns the stored decision and consumes nothing
-        final RequestTable.Entry seen = requests.get(c.userId, c.requestIdHigh, c.requestIdLow);
-        if (seen != null) {
-            if (seen.fingerprint != c.fingerprint()) {
-                reject(sink, c, CoreRejectReason.REQUEST_ID_PAYLOAD_MISMATCH, seen.requestSeq, now, false);
-                return;
-            }
-            if (seen.reason != 0) {
-                reject(sink, c, reasonOf(seen.reason), 0, now, false); // the stored decision stands
-                return;
-            }
-            final CoreOrder live = orders.get(seen.orderId);
-            sink.onOrderAck(c.correlationId, c.requestIdHigh, c.requestIdLow, seen.orderId, c.userId, c.marketId,
-                    live == null ? OrderStatus.PENDING_NEW : statusOf(live), true,
-                    live == null ? 0 : live.holdAssetId, live == null ? 0L : live.holdAmount, now, live == null ? 0L : live.eventSeq);
+        // 0b. requestId: a replay returns the stored decision and consumes nothing (behaviour 4 already looked, and
+        //     nothing between there and here records a request)
+        if (!lookupFirst && replayStoredCreate(sink, c, now)) {
             return;
         }
-        if (requests.countFor(c.userId) >= RequestTable.PER_USER_CAP) {
+        if (requests.countFor(c.userId) >= ledger.limits().requestPerUserCap()) {
             reject(sink, c, CoreRejectReason.TOO_MANY_PENDING_REQUESTS, requests.countFor(c.userId), now, false);
             return;
         }
@@ -506,8 +510,33 @@ public final class OrderEngine {
         }
         sink.onOrderAck(c.correlationId, c.requestIdHigh, c.requestIdLow, orderId, c.userId, c.marketId,
                 armed ? OrderStatus.PENDING_TRIGGER : OrderStatus.PENDING_NEW, false, holdAsset, holdAmount, now, eventSeq);
-        sink.onOrderEvent(eventSeq, ledger.getLogPosition(), o, EventKind.ACCEPTED, CoreRejectReason.NONE, 0L, 0L, 0L,
-                account.holdRemaining(orderId), now);
+        publishEvent(eventSeq, o, EventKind.ACCEPTED, CoreRejectReason.NONE, 0L, 0L, 0L, account.holdRemaining(orderId), now,
+                NOT_ME_SOURCED);
+    }
+
+    /**
+     * The requestId lookup of the create path. False on a miss. On a hit the stored decision is the answer and nothing
+     * is consumed: a different payload is REQUEST_ID_PAYLOAD_MISMATCH, a stored reject replays, a stored acceptance is
+     * acked as a duplicate with the live order's status (PENDING_NEW with no hold once the order is gone).
+     */
+    private boolean replayStoredCreate(final CoreEventSink sink, final CreateOrderCommand c, final long now) {
+        final RequestTable.Entry seen = requests.get(c.userId, c.requestIdHigh, c.requestIdLow);
+        if (seen == null) {
+            return false;
+        }
+        if (seen.fingerprint != c.fingerprint()) {
+            reject(sink, c, CoreRejectReason.REQUEST_ID_PAYLOAD_MISMATCH, seen.requestSeq, now, false);
+            return true;
+        }
+        if (seen.reason != 0) {
+            reject(sink, c, reasonOf(seen.reason), 0, now, false); // the stored decision stands
+            return true;
+        }
+        final CoreOrder live = orders.get(seen.orderId);
+        sink.onOrderAck(c.correlationId, c.requestIdHigh, c.requestIdLow, seen.orderId, c.userId, c.marketId,
+                live == null ? OrderStatus.PENDING_NEW : statusOf(live), true,
+                live == null ? 0 : live.holdAssetId, live == null ? 0L : live.holdAmount, now, live == null ? 0L : live.eventSeq);
+        return true;
     }
 
     /**
@@ -682,8 +711,21 @@ public final class OrderEngine {
         final long eventSeq = ledger.getEventSeq() + 1;
         ledger.setEventSeq(eventSeq);
         o.eventSeq = eventSeq;
-        ledger.eventSink().onOrderEvent(eventSeq, ledger.getLogPosition(), o, kind, reason, lastPrice, lastQty, tradeId,
-                holdRemaining(o), now, meReason);
+        publishEvent(eventSeq, o, kind, reason, lastPrice, lastQty, tradeId, holdRemaining(o), now, meReason);
+    }
+
+    /**
+     * The one exit of an order event: the record joins the replay ring, then the sink. Both carry the same fields, and
+     * the ring is written on every member (a follower's sink emits nothing), so a replay after a leader change returns
+     * what the lost broadcast carried.
+     */
+    private void publishEvent(final long eventSeq, final CoreOrder o, final EventKind kind, final CoreRejectReason reason,
+                              final long lastPrice, final long lastQty, final long tradeId, final long holdRemaining,
+                              final long now, final int meReason) {
+        final long position = ledger.getLogPosition();
+        eventRing.append(eventSeq, position, o, kind, reason, lastPrice, lastQty, tradeId, holdRemaining, now, meReason);
+        ledger.eventSink().onOrderEvent(eventSeq, position, o, kind, reason, lastPrice, lastQty, tradeId, holdRemaining, now,
+                meReason);
     }
 
     /** D9b: the pending ME reason, once. */
@@ -696,6 +738,11 @@ public final class OrderEngine {
     /** The v3 rules read the recorded behaviour, one field read per apply. */
     private boolean v3() {
         return ledger.coreConfig().behaviorVersion() >= 3;
+    }
+
+    /** Behaviour 4: the create path looks its requestId up first. */
+    private boolean v4() {
+        return ledger.coreConfig().behaviorVersion() >= 4;
     }
 
     /** 12.2: under v3 a leg may be installed only when it is newer than every leg the order has had. */
@@ -814,7 +861,10 @@ public final class OrderEngine {
 
     private void remember(final long userId, final long high, final long low, final long fingerprint, final long now,
                           final int kind, final long orderId, final int reason) {
-        final RequestTable.Entry e = requests.put(userId, high, low, fingerprint, now + RequestTable.TTL_MS, kind, orderId, reason);
+        // the TTL is the limits record's at this log position; a TTL too long for the clock means "never", not "at once"
+        final long ttl = ledger.limits().requestTtlMs();
+        final long expiresAt = now > Long.MAX_VALUE - ttl ? Long.MAX_VALUE : now + ttl;
+        final RequestTable.Entry e = requests.put(userId, high, low, fingerprint, expiresAt, kind, orderId, reason);
         ledger.deadlines().add(e.expiresAtMs, e.requestSeq, DeadlineIndex.KIND_REQUEST_TTL);
     }
 
@@ -2482,7 +2532,7 @@ public final class OrderEngine {
                     live == null ? 0 : live.holdAssetId, live == null ? 0L : live.holdAmount, now, live == null ? 0L : live.eventSeq);
             return;
         }
-        if (requests.countFor(c.userId) >= RequestTable.PER_USER_CAP) {
+        if (requests.countFor(c.userId) >= ledger.limits().requestPerUserCap()) {
             rejectAmend(sink, c, CoreRejectReason.TOO_MANY_PENDING_REQUESTS, requests.countFor(c.userId), now, false);
             return;
         }
@@ -2672,6 +2722,37 @@ public final class OrderEngine {
         }
         sink.onOrderSnapshotEnd(correlationId, n[0], more[0] ? lastId[0] : 0L, ledger.getLogPosition());
         Arrays.fill(snapshotPage, 0, n[0], null);
+    }
+
+    /**
+     * RequestOrderEvents (54), ORIGIN-only reply (every behaviour): the retained events above {@code fromEventSeq}, in
+     * order, then the terminator. {@code maxEvents < 0}: OrderReject INVALID naming 54; {@code 0}: the head probe (the
+     * terminator alone, no ring visit); {@code 1..4096} a page (above 4096 clamped). When the first event asked for has
+     * left the ring the reply is the terminator alone, whose {@code firstAvailableSeq} says so: never a partial reply
+     * with a silent hole. Read-only: no state changes, no endApply, no BROADCAST.
+     */
+    public void applyRequestOrderEvents(final long correlationId, final long fromEventSeq, final int maxEvents) {
+        final CoreEventSink sink = ledger.eventSink();
+        if (maxEvents < 0) {
+            sink.onOrderReject(correlationId, 0L, 0L, 0L, 0L, 0, T_ORDER_EVENTS, CoreRejectReason.INVALID, 255, maxEvents,
+                    ledger.getLastLogTime());
+            return;
+        }
+        final long lastSeq = ledger.getEventSeq();
+        final long firstAvailable = lastSeq - eventRing.count() + 1;
+        if (maxEvents == 0 || fromEventSeq < firstAvailable - 1 || fromEventSeq >= lastSeq) {
+            // head probe, overrun (the ring no longer holds fromEventSeq + 1), or nothing newer than the cursor
+            sink.onOrderEventsEnd(correlationId, 0, firstAvailable, lastSeq, fromEventSeq);
+            return;
+        }
+        final int n = (int) Math.min(Math.min(maxEvents, ORDER_EVENTS_CAP), lastSeq - fromEventSeq);
+        sink.onOrderEventsPage(correlationId, eventRing, fromEventSeq + 1, n);
+        sink.onOrderEventsEnd(correlationId, n, firstAvailable, lastSeq, fromEventSeq + n);
+    }
+
+    /** The replay ring (snapshot section, limits apply, tests). */
+    public OrderEventRing eventRing() {
+        return eventRing;
     }
 
     /**

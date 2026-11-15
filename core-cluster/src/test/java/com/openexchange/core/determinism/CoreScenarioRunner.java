@@ -52,6 +52,8 @@ import java.util.Map;
  *   METRADE id= market= taker= maker= px= qty= takerBuy= [takerLeg= makerLeg= takerUser= makerUser= seq=] ; METERMINAL order= leg= status=
  *   MEOUTCOME order= kind= attempt= result= [leg= reason= old=] ; AMEND u= order= [px=] [qty=] [rid=] ; QUARANTINE order=
  *   ORDERSNAP u= [from=] ; PENDINGDISPATCH [from=] [max=]
+ *   ORDEREVENTS [from=] [max=] [corr=] ; USERBALANCES u= [corr=] ; CONFIGREPORT [corr=]
+ *   LIMITS ver= ttlMs= cap= ring= [corr=]   the limits record (ADMIN); V3GENESIS [behavior=4] one more CoreConfig step
  * (behaviour v3 feed; seq= stays the egressSeq): METRADE/METERMINAL/MEOUTCOME [jseq=] [epoch=],
  *   METERMINAL [meReason=], MEOUTCOME [oldCancelled=], MARKETTICK [epoch=], GATE [reason=] [corr=],
  *   V3GENESIS [bind=0], MECONFIG jseq= epoch= cfg= behavior= cap= maxWire= decision=, MERELEASE jseq= epoch=,
@@ -316,7 +318,7 @@ public final class CoreScenarioRunner {
             case "V3GENESIS":
                 // CoreConfig 1 -> 2 -> 3 (genesisId 0x5EED, test seam widened) and, unless bind=0, 68 FRESH jseq 1
                 if (optLong(kv, "bind", 1L) != 0) {
-                    V3Genesis.boot(engine, clock.now());
+                    V3Genesis.boot(engine, clock.now(), optLong(kv, "behavior", 3L)); // behavior=4: one more CoreConfig step
                 } else {
                     V3Genesis.switchTo3(engine, clock.now());
                 }
@@ -369,6 +371,20 @@ public final class CoreScenarioRunner {
             case "ORDERSNAP":
                 engine.orders().applyRequestOrderSnapshot(kv.containsKey("corr") ? reqLong(kv, "corr") : 0L, reqLong(kv, "u"),
                         kv.containsKey("from") ? reqLong(kv, "from") : 0L, true);
+                break;
+            case "ORDEREVENTS":
+                engine.orders().applyRequestOrderEvents(optLong(kv, "corr", 0L), optLong(kv, "from", 0L),
+                        kv.containsKey("max") ? reqInt(kv, "max") : 1024);
+                break;
+            case "USERBALANCES":
+                engine.requestUserBalances(optLong(kv, "corr", 0L), reqLong(kv, "u"));
+                break;
+            case "CONFIGREPORT":
+                engine.requestCoreConfig(optLong(kv, "corr", 0L));
+                break;
+            case "LIMITS":
+                engine.applyCoreLimitsSet(optLong(kv, "corr", 0L), reqLong(kv, "ver"), reqLong(kv, "ttlMs"), reqInt(kv, "cap"),
+                        reqInt(kv, "ring"), clock.now());
                 break;
             case "PENDINGDISPATCH":
                 engine.orders().applyRequestPendingDispatch(kv.containsKey("corr") ? reqLong(kv, "corr") : 0L,

@@ -189,7 +189,7 @@ final class ServiceEgressRig {
         } catch (final ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
-        engine().coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        engine().coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         enc.meEpoch = V3Genesis.GENESIS_ID;
         enc.genesisId = V3Genesis.GENESIS_ID;
     }

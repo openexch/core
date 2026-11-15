@@ -2,9 +2,9 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="com.openexchange.core.infrastructure.generated"
                    id="2"
-                   version="7"
-                   semanticVersion="0.7"
-                   description="OMS + ledger core schema (money-schema v7): balances, holds, settlement, order lifecycle, ME feed, admin, session. All amounts are 8dp fixed-point int64. One schema, one demuxer, one exact-version gate (RC1 S1)."
+                   version="8"
+                   semanticVersion="0.8"
+                   description="OMS + ledger core schema (money-schema v8): balances, holds, settlement, order lifecycle, ME feed, admin, session, gateway queries. All amounts are 8dp fixed-point int64. One schema, one demuxer, one exact-version gate."
 >
     <types>
         <composite name="messageHeader" description="Message identifiers and length of message root">
@@ -199,6 +199,7 @@
             <validValue name="RISK">1</validValue>
             <validValue name="BREAKER">2</validValue>
             <validValue name="GATE">3</validValue>
+            <validValue name="LIMITS" description="v8: the core limits record (CoreLimitsSet 77); marketId 0" sinceVersion="8">4</validValue>
         </enum>
         <enum name="OrderFaultKind" encodingType="uint8">
             <validValue name="OVERFILL">0</validValue>
@@ -426,6 +427,22 @@
         <field name="fromOrderId"   id="3" type="int64"/>
     </sbe:message>
 
+    <!-- ============================ v8 gateway queries 54-56, GATEWAY / ADMIN class ============================ -->
+    <sbe:message name="RequestOrderEvents" id="54" sinceVersion="8" description="read-only: GATEWAY / ADMIN with an any-user key (the events are exchange-wide; a user-scoped key is NOT_OWNER). Replays order events from the bounded, snapshotted event ring: every event with eventSeq above fromEventSeq (exclusive cursor), in order, as OrderEventsPage frames then one OrderEventsEnd. maxEvents: 0 = head probe (End only, no ring visit), 1..4096 = page size, above 4096 clamped to 4096, negative = OrderReject INVALID naming 54. When fromEventSeq + 1 is below the first event the ring still holds the reply is OrderEventsEnd alone with count 0: an overrun is explicit, never a partial reply. A negative fromEventSeq is answered the same way, as an overrun with nextFromSeq equal to that negative fromEventSeq, even when the ring holds every event; a client starting from the beginning sends 0. A fromEventSeq at or above lastSeq is answered with OrderEventsEnd alone, count 0, nextFromSeq = fromEventSeq; when it is above lastSeq the cursor is ahead of this core (for example a cursor kept across a new genesis), nextFromSeq never becomes equal to lastSeq, and the client must treat the reply as a resync.">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="fromEventSeq"  id="2" type="int64"/>
+        <field name="maxEvents"     id="3" type="int32" description="0 = head probe, 1..4096 = page size, above 4096 clamped to 4096, negative = INVALID"/>
+    </sbe:message>
+
+    <sbe:message name="RequestUserBalances" id="55" sinceVersion="8" description="read-only, user-scoped like RequestOrderSnapshot: GATEWAY / ADMIN. Reply UserBalances: one frame with the user's balance lines.">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="userId"        id="2" type="int64"/>
+    </sbe:message>
+
+    <sbe:message name="RequestCoreConfig" id="56" sinceVersion="8" description="read-only: GATEWAY / ADMIN. Reply CoreConfigReport: the recorded config, the limits record, the risk rows and the gate and breaker state of every market.">
+        <field name="correlationId" id="1" type="int64"/>
+    </sbe:message>
+
     <!-- ============================ v6 (RC1) feed ingress 60-69, FORWARDER / BRIDGE class ============================ -->
     <sbe:message name="MarketTick" id="60" sinceVersion="6" description="Forwarder-stitched top of book (K4; critic D14: 6 fields + meEpoch, quotes only). The core ignores a tick whose bookVersion is not above the stored one, so N forwarders are safe. State only, no egress.">
         <field name="marketId"       id="1" type="int32"/>
@@ -633,6 +650,14 @@
         <field name="correlationId" id="1" type="int64"/>
         <field name="haltReason"    id="2" type="FeedHaltReason"/>
         <field name="journalSeq"    id="3" type="int64"/>
+    </sbe:message>
+
+    <sbe:message name="CoreLimitsSet" id="77" sinceVersion="8" description="ADMIN: the core limits record, replicated and snapshotted, monotonic configVersion (equal version and equal values = DUPLICATE, a version at or below the recorded one = STALE). requestTtlMs: how long a requestId decision is remembered; applies to entries recorded after this record. requestPerUserCap: remembered requests per user above which CreateOrder and AmendOrder are TOO_MANY_PENDING_REQUESTS; applies at once and evicts nothing. orderEventRingCapacity: events kept for RequestOrderEvents; a smaller ring keeps the newest events at the apply, 0 switches replay off. requestTtlMs below 1, requestPerUserCap below 1, a negative orderEventRingCapacity, or one above 12859183 (the most one snapshot section's 32-bit length field can describe; this bounds that field only and does not mean an image holding that many events can be written) is REJECTED reason INVALID. Genesis record: version 0, 900000 ms, 256, 65536. Reply ORIGIN AdminAck{refTemplateId 77} and BROADCAST ConfigApplied{LIMITS, marketId 0}.">
+        <field name="correlationId"          id="1" type="int64"/>
+        <field name="configVersion"          id="2" type="uint32"/>
+        <field name="requestTtlMs"           id="3" type="int64"/>
+        <field name="requestPerUserCap"      id="4" type="int32"/>
+        <field name="orderEventRingCapacity" id="5" type="int32"/>
     </sbe:message>
 
     <!-- ============================ v6 (RC1) session 80-89 ============================ -->
@@ -999,7 +1024,7 @@
         <field name="reason"        id="7" type="RejectReason"/>
     </sbe:message>
 
-    <sbe:message name="ConfigApplied" id="112" sinceVersion="6" description="BROADCAST control: a config record (CORE/RISK/BREAKER/GATE) was applied at configVersion for marketId (0 = global/default).">
+    <sbe:message name="ConfigApplied" id="112" sinceVersion="6" description="BROADCAST control: a config record (CORE/RISK/BREAKER/GATE/LIMITS) was applied at configVersion for marketId (0 = global/default).">
         <field name="kind"          id="1" type="ConfigKind"/>
         <field name="marketId"      id="2" type="int32"/>
         <field name="configVersion" id="3" type="uint32"/>
@@ -1022,5 +1047,96 @@
         <field name="journalPosition" id="3" type="int64"/>
         <field name="reason"          id="4" type="SettleRejectReason"/>
         <field name="detail"          id="5" type="int64"/>
+    </sbe:message>
+
+    <!-- ============================ v8 gateway query replies 115-118, ORIGIN ============================ -->
+    <sbe:message name="OrderEventsPage" id="115" sinceVersion="8" description="ORIGIN reply chunk to RequestOrderEvents (cap 44 per frame), ascending eventSeq with no gap inside one reply. Each entry is the OrderEvent (102) block, byte for byte as it was broadcast. Own template so that a session that also receives the live OrderEventBatch can tell a replay from live.">
+        <field name="correlationId" id="1" type="int64"/>
+        <group name="events" id="20" dimensionType="groupSizeEncoding">
+            <field name="eventSeq"          id="1"  type="int64"/>
+            <field name="logPosition"       id="2"  type="int64"/>
+            <field name="orderId"           id="3"  type="int64"/>
+            <field name="userId"            id="4"  type="int64"/>
+            <field name="marketId"          id="5"  type="int32"/>
+            <field name="eventKind"         id="6"  type="EventKind"/>
+            <field name="status"            id="7"  type="OrderStatus"/>
+            <field name="reason"            id="8"  type="CoreRejectReason"/>
+            <field name="side"              id="9"  type="Side"/>
+            <field name="orderType"         id="10" type="OrderType"/>
+            <field name="timeInForce"       id="11" type="TimeInForce"/>
+            <field name="price"             id="12" type="int64"/>
+            <field name="stopPrice"         id="13" type="int64"/>
+            <field name="quantity"          id="14" type="int64"/>
+            <field name="filledQty"         id="15" type="int64"/>
+            <field name="remainingQty"      id="16" type="int64"/>
+            <field name="lastPrice"         id="17" type="int64"/>
+            <field name="lastQty"           id="18" type="int64"/>
+            <field name="tradeId"           id="19" type="int64"/>
+            <field name="meOrderId"         id="20" type="int64"/>
+            <field name="holdAssetId"       id="21" type="int32"/>
+            <field name="holdAmount"        id="22" type="int64"/>
+            <field name="holdRemaining"     id="23" type="int64"/>
+            <field name="clientOrderIdHigh" id="24" type="int64"/>
+            <field name="clientOrderIdLow"  id="25" type="int64"/>
+            <field name="createdAtMs"       id="26" type="int64"/>
+            <field name="updatedAtMs"       id="27" type="int64"/>
+            <field name="meReason"          id="28" type="uint8"/>
+        </group>
+    </sbe:message>
+
+    <sbe:message name="OrderEventsEnd" id="116" sinceVersion="8" description="Terminates a RequestOrderEvents reply. count = events in this reply; firstAvailableSeq = the oldest eventSeq the ring holds (lastSeq + 1 when it holds none); lastSeq = the newest eventSeq the core has emitted; nextFromSeq = the cursor for the next request (fromEventSeq + count). The replay is complete when nextFromSeq equals lastSeq. An overrun is count 0 with firstAvailableSeq above fromEventSeq + 1; a negative fromEventSeq is always answered as an overrun (nextFromSeq negative). nextFromSeq above lastSeq means the request's cursor was ahead of this core: the replay can never complete from it, and the client must treat the reply as a resync.">
+        <field name="correlationId"     id="1" type="int64"/>
+        <field name="count"             id="2" type="int32"/>
+        <field name="firstAvailableSeq" id="3" type="int64"/>
+        <field name="lastSeq"           id="4" type="int64"/>
+        <field name="nextFromSeq"       id="5" type="int64"/>
+    </sbe:message>
+
+    <sbe:message name="UserBalances" id="117" sinceVersion="8" description="ORIGIN reply to RequestUserBalances, one frame. known = an account record exists for the user. balances: one entry per asset with a nonzero available or locked amount, ascending assetId; an absent asset is zero.">
+        <field name="correlationId"   id="1" type="int64"/>
+        <field name="userId"          id="2" type="int64"/>
+        <field name="known"           id="3" type="BoolFlag"/>
+        <field name="asOfLogPosition" id="4" type="int64"/>
+        <group name="balances" id="20" dimensionType="groupSizeEncoding">
+            <field name="assetId"   id="1" type="int32"/>
+            <field name="available" id="2" type="int64"/>
+            <field name="locked"    id="3" type="int64"/>
+        </group>
+    </sbe:message>
+
+    <sbe:message name="CoreConfigReport" id="118" sinceVersion="8" description="ORIGIN reply to RequestCoreConfig, one frame. configVersion 0 with empty groups = no CoreConfig recorded yet. The limits fields are the recorded CoreLimitsSet (limitsVersion 0 = the genesis record). gateState and gateReasons are the global gate. markets: the recorded CoreConfig row, the risk limits a client needs, and the market's own gate and breaker state, ascending marketId.">
+        <field name="correlationId"          id="1"  type="int64"/>
+        <field name="configVersion"          id="2"  type="uint32"/>
+        <field name="behaviorVersion"        id="3"  type="uint32"/>
+        <field name="limitsVersion"          id="4"  type="uint32"/>
+        <field name="requestTtlMs"           id="5"  type="int64"/>
+        <field name="requestPerUserCap"      id="6"  type="int32"/>
+        <field name="orderEventRingCapacity" id="7"  type="int32"/>
+        <field name="gateState"              id="8"  type="GateState"/>
+        <field name="gateReasons"            id="9"  type="GateReasons"/>
+        <field name="asOfLogPosition"        id="10" type="int64"/>
+        <group name="markets" id="20" dimensionType="groupSizeEncoding">
+            <field name="marketId"          id="1"  type="int32"/>
+            <field name="symbol"            id="2"  type="Symbol"/>
+            <field name="baseAssetId"       id="3"  type="int32"/>
+            <field name="quoteAssetId"      id="4"  type="int32"/>
+            <field name="tickSize"          id="5"  type="int64"/>
+            <field name="minPrice"          id="6"  type="int64"/>
+            <field name="maxPrice"          id="7"  type="int64"/>
+            <field name="lotSize"           id="8"  type="int64"/>
+            <field name="minQuantity"       id="9"  type="int64"/>
+            <field name="maxQuantity"       id="10" type="int64"/>
+            <field name="minNotional"       id="11" type="int64"/>
+            <field name="maxNotional"       id="12" type="int64"/>
+            <field name="riskConfigVersion" id="13" type="uint32"/>
+            <field name="gateState"         id="14" type="GateState"/>
+            <field name="gateReasons"       id="15" type="GateReasons"/>
+            <field name="circuitBreaker"    id="16" type="BoolFlag"/>
+        </group>
+        <group name="assets" id="21" dimensionType="groupSizeEncoding">
+            <field name="assetId" id="1" type="int32"/>
+            <field name="code"    id="2" type="AssetCode"/>
+            <field name="scale"   id="3" type="uint8"/>
+        </group>
     </sbe:message>
 </sbe:messageSchema>

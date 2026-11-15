@@ -189,18 +189,18 @@ public class IngressFenceTest {
     }
 
     @Test
-    public void versionOutsideExactSevenIsDropped() {
-        // The core speaks exactly v7; a v6 producer is not silently decoded with absent
-        // fields, it is dropped and counted, and so is a v8 one.
+    public void versionOutsideTheExactOneIsDropped() {
+        // The core speaks exactly v8; a v7 producer is not half-understood, it is dropped and counted, and so is a
+        // v9 one.
         final Rig r = new Rig();
-        for (final int version : new int[] {0, 6, 8}) {
+        for (final int version : new int[] {0, 7, 9}) {
             final int len = r.deposit(1, 0, 100);
             r.buf.putShort(6, (short) version, ByteOrder.LITTLE_ENDIAN);
             r.dispatch(len);
         }
         assertEquals(3, r.demuxer.schemaRejectCount());
         assertEquals(0, r.engine.accountCount());
-        r.dispatch(r.deposit(1, 0, 100)); // version 7 applies
+        r.dispatch(r.deposit(1, 0, 100)); // version 8 applies
         assertEquals(1, r.engine.accountCount());
     }
 

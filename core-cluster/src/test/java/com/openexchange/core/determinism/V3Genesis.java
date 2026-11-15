@@ -6,8 +6,8 @@ import com.openexchange.core.domain.ConfigDecision;
 import com.openexchange.core.domain.commands.CoreConfigCommand;
 
 /**
- * (contract section 16 preamble): the one way every v3 test boots. It widens the jar's supported behaviour set
- * through the existing test seam (the production set stays {1, 2}, so this is required in GREEN too), sends CoreConfig
+ * The one way every feed-bound test boots. It sets the jar's supported behaviour set
+ * through the existing test seam, sends CoreConfig
  * 1 -> 2 -> 3 with one {@code genesisId} while GLOBAL is SUSPENDED (genesis state), then the ME's FRESH EngineConfig 68 at
  * journalSeq 1 with that genesisId as the epoch, which binds the feed.
  */
@@ -32,7 +32,7 @@ public final class V3Genesis {
     }
 
     public static void widen(final CoreEngine engine) {
-        engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
     }
 
     /** CoreConfig 1 -> 2 -> 3 (ADOPT, SWITCH, SWITCH); the feed stays unbound. */
@@ -57,5 +57,23 @@ public final class V3Genesis {
     public static void boot(final CoreEngine engine, final long now) {
         switchTo3(engine, now);
         bind(engine, 1L, now);
+    }
+
+    /**
+     * {@link #boot} then one CoreConfig per step up to {@code behavior} (3 = {@link #boot} alone). The steps above 3
+     * have no precondition, so the order relative to the bind does not matter; they are taken after it.
+     */
+    public static void boot(final CoreEngine engine, final long now, final long behavior) {
+        if (behavior < 3) {
+            throw new IllegalArgumentException("a feed-bound genesis starts at behaviour 3, got " + behavior);
+        }
+        boot(engine, now);
+        for (long v = 4; v <= behavior; v++) {
+            engine.applyCoreConfig(config(v, v), now);
+        }
+        if (engine.coreConfig().behaviorVersion() != behavior) {
+            throw new IllegalStateException("genesis: behaviour " + behavior + " was not recorded (behaviour "
+                    + engine.coreConfig().behaviorVersion() + ")");
+        }
     }
 }

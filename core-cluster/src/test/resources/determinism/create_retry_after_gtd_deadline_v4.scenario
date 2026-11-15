@@ -1,0 +1,16 @@
+# Behaviour 4: the same log as create_retry_after_gtd_deadline_v3 one behaviour step later. The retry of an accepted
+# GTD create after its deadline is acked as a duplicate of order 1 (its status is the live order's), not EXPIRED, before
+# and after a restore. A first-time GTD create whose deadline has already passed (rid 2) is still EXPIRED and stores
+# nothing.
+CLOCK 1700000000000
+V3GENESIS behavior=4
+GATE market=0 open=1
+DEPOSIT u=1 asset=0 amt=100000.0
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=21   # accepted: order 1
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=22   # before the deadline: duplicate ack
+TICK 2000                                                                                  # the deadline fires
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=23   # after the deadline: duplicate ack
+SNAPSHOT
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=1 corr=24   # the same after a restore
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 tif=3 exp=1700000001000 rid=2 corr=25   # first time, past deadline: EXPIRED
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=2.0 tif=3 exp=1700000001000 rid=1 corr=26   # other payload: REQUEST_ID_PAYLOAD_MISMATCH

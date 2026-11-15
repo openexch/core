@@ -1,0 +1,21 @@
+# The step from behaviour 3 to 4 inside one log. Under 3 a retried create whose order was accepted is answered
+# GATE_CLOSED while the gate is closed. CoreConfig version 4 (behaviour 4) is ACCEPTED with the gate closed or open and
+# orders live; it emits its ack and its ConfigApplied and touches nothing else. From the next command on the same
+# retry is the stored acceptance. A resend is a DUPLICATE, a step back to 3 is REJECTED, and a snapshot keeps 4.
+CLOCK 1700000000000
+V3GENESIS
+GATE market=0 open=1
+DEPOSIT u=1 asset=0 amt=100000.0
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=11       # accepted: order 1
+GATE market=0 open=0
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=12       # behaviour 3: GATE_CLOSED
+CORECONFIG ver=4 behavior=4 corr=74                                    # ACCEPTED: behaviour 4 from here on
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=13       # behaviour 4: duplicate ack, order 1
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=2 corr=14       # first time under the closed gate: GATE_CLOSED
+CORECONFIG ver=4 behavior=4 corr=75                                    # DUPLICATE
+CORECONFIG ver=5 behavior=3 corr=76                                    # REJECTED: no step back
+SNAPSHOT
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=1 corr=15       # still behaviour 4 after the restore
+GATE market=0 open=1
+CREATE u=1 market=1 side=0 type=0 px=100.0 qty=1.0 rid=2 corr=16       # admitted: order 2
+CONFIGREPORT corr=17                                                   # behaviour 4, config version 4

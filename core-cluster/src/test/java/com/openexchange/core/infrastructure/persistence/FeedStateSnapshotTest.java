@@ -82,12 +82,24 @@ public class FeedStateSnapshotTest {
         return out;
     }
 
+    /**
+     * A copy of {@code image} with a section {@code id} spliced in where its id belongs: before the first section with
+     * a higher id (the limits record and the event ring, sections 13 and 14, end every image).
+     */
     static byte[] appendSection(final byte[] image, final int id, final byte[] body) {
-        final byte[] out = Arrays.copyOf(image, image.length + 6 + body.length);
+        final UnsafeBuffer in = new UnsafeBuffer(image);
+        int at = HEADER;
+        for (int i = in.getInt(HEADER - 4); i > 0 && in.getShort(at) < id; i--) {
+            at += 6 + in.getInt(at + 2);
+        }
+        final int extra = 6 + body.length;
+        final byte[] out = new byte[image.length + extra];
+        System.arraycopy(image, 0, out, 0, at);
+        System.arraycopy(image, at, out, at + extra, image.length - at);
         final UnsafeBuffer b = new UnsafeBuffer(out);
-        b.putShort(image.length, (short) id);
-        b.putInt(image.length + 2, body.length);
-        b.putBytes(image.length + 6, body);
+        b.putShort(at, (short) id);
+        b.putInt(at + 2, body.length);
+        b.putBytes(at + 6, body);
         b.putInt(HEADER - 4, b.getInt(HEADER - 4) + 1);
         return out;
     }

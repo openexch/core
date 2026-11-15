@@ -123,6 +123,41 @@ final class CoreFrameEncoders {
                 .fromOrderId(fromOrderId).encodedLength());
     }
 
+    // ---- gateway queries and the limits record (v8) ----
+
+    byte[] orderEvents(long corr, long fromEventSeq, int maxEvents) {
+        zero();
+        final com.openexchange.core.infrastructure.generated.RequestOrderEventsEncoder e =
+                new com.openexchange.core.infrastructure.generated.RequestOrderEventsEncoder().wrapAndApplyHeader(buf, 0, header)
+                        .correlationId(corr).fromEventSeq(fromEventSeq).maxEvents(maxEvents);
+        return out(e.encodedLength());
+    }
+
+    byte[] userBalances(long corr, long user) {
+        zero();
+        final com.openexchange.core.infrastructure.generated.RequestUserBalancesEncoder e =
+                new com.openexchange.core.infrastructure.generated.RequestUserBalancesEncoder().wrapAndApplyHeader(buf, 0, header)
+                        .correlationId(corr).userId(user);
+        return out(e.encodedLength());
+    }
+
+    byte[] coreConfigRequest(long corr) {
+        zero();
+        final com.openexchange.core.infrastructure.generated.RequestCoreConfigEncoder e =
+                new com.openexchange.core.infrastructure.generated.RequestCoreConfigEncoder().wrapAndApplyHeader(buf, 0, header)
+                        .correlationId(corr);
+        return out(e.encodedLength());
+    }
+
+    byte[] limits(long corr, long version, long ttlMs, int perUserCap, int ringCapacity) {
+        zero();
+        final com.openexchange.core.infrastructure.generated.CoreLimitsSetEncoder e =
+                new com.openexchange.core.infrastructure.generated.CoreLimitsSetEncoder().wrapAndApplyHeader(buf, 0, header)
+                        .correlationId(corr).configVersion(version).requestTtlMs(ttlMs).requestPerUserCap(perUserCap)
+                        .orderEventRingCapacity(ringCapacity);
+        return out(e.encodedLength());
+    }
+
     byte[] pendingDispatch(long corr, long fromSeq, int max) {
         zero();
         return out(new RequestPendingDispatchEncoder().wrapAndApplyHeader(buf, 0, header).correlationId(corr)

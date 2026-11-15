@@ -173,13 +173,13 @@ public class BehaviorV3Test {
         assertEquals("deposits do not break feed-virginity", AdminResult.ADOPTED, new Box(true).config(1, 1, G).result());
     }
 
-    // Behaviour 3 joins the production set; replaces productionSupportedSetStaysOneTwo
+    // Behaviour 3 is in the production set (and 4 after it: the create requestId lookup first)
     @Test
     public void productionSupportedSetIncludesThree() {
-        assertArrayEquals("the jar ships behaviour {1, 2, 3}", new int[] {1, 2, 3},
+        assertArrayEquals("the jar ships behaviour {1, 2, 3, 4}", new int[] {1, 2, 3, 4},
                 CoreConfigStateMachine.SUPPORTED_BEHAVIOR_VERSIONS);
         final Box b = new Box(false);
-        assertArrayEquals(new int[] {1, 2, 3}, b.engine.coreConfig().supportedBehaviorVersions());
+        assertArrayEquals(new int[] {1, 2, 3, 4}, b.engine.coreConfig().supportedBehaviorVersions());
         b.config(1, 1, G);
         b.config(2, 2, G);
         assertEquals(AdminResult.ACCEPTED, b.config(3, 3, G).result());
@@ -280,7 +280,8 @@ public class BehaviorV3Test {
         try (Stream<Path> s = Files.list(dir)) {
             scenarios = s.filter(p -> p.toString().endsWith(".scenario")).sorted().collect(Collectors.toList());
         }
-        assertEquals("the corpus: 39 scenarios (feed_lane_halts_auto_reopen included)", 39, scenarios.size());
+        assertEquals("the corpus: 46 scenarios (the create-retry pairs, the limits record, the event ring and the 3 to 4 "
+                + "switch joined the 39)", 46, scenarios.size());
         for (final Path p : scenarios) {
             final String name = p.getFileName().toString().replace(".scenario", "");
             final String golden = Files.readString(dir.resolve(name + ".golden"), StandardCharsets.UTF_8);

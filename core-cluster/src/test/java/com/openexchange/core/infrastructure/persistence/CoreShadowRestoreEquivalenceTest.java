@@ -441,6 +441,169 @@ public class CoreShadowRestoreEquivalenceTest {
         }
     }
 
+    // ------------------------------------------------------------------------------------------ the event ring and the limits record
+
+    static final int RING = 64;
+    static final int QUERIES = 5;
+    private static RecordedLog ringLog;
+
+    /**
+     * The corpus with an ADMIN limits record right after the ADMIN session opens (a ring of {@link #RING}, a 10 min TTL,
+     * a cap of 200) and, as its last {@link #QUERIES} frames, the queries whose replies must not depend on how a member
+     * came to its state: the whole wrapped ring, a short page, an overrun, the config report and one user's balances.
+     */
+    static RecordedLog ringLog() {
+        if (ringLog != null) {
+            return ringLog;
+        }
+        final List<SessionedLog.LogStep> steps = new ArrayList<>(CoreReplayParityTest.coreSteps(CoreReplayParityTest.SEED,
+                CoreReplayParityTest.FRAMES));
+        final long admin = SessionedLog.sessionOf(com.openexchange.core.infrastructure.generated.SessionClass.ADMIN);
+        int open = -1;
+        for (int i = 0; i < steps.size() && open < 0; i++) {
+            if (steps.get(i).kind() == SessionedLog.Kind.OPEN && steps.get(i).sessionId() == admin) {
+                open = i;
+            }
+        }
+        assertTrue("the corpus opens an ADMIN session", open >= 0);
+        final CoreFrameEncoders enc = new CoreFrameEncoders();
+        steps.add(open + 1, SessionedLog.message(admin, steps.get(open).timestamp(), enc.limits(77_001L, 1, 600_000L, 200, RING)));
+        // one pass to learn the head of the event sequence, so the last queries can name it
+        final RecordedLog first = CoreShadowRig.write(fixture, steps, -1, 0, 0).frames();
+        final Engines engines = new Engines();
+        final CoreLogApplier a = engines.get();
+        a.genesis();
+        first.replay(-1, Long.MAX_VALUE, MemberModel.entries(a));
+        final long last = a.engine().getEventSeq();
+        assertEquals("the limits record was applied", 1L, a.engine().limits().version());
+        assertTrue("the corpus wraps a ring of " + RING + " several times (eventSeq " + last + ")", last > 3L * RING);
+        assertEquals("the ring is full", RING, a.engine().orders().eventRing().count());
+        final long ts = steps.get(steps.size() - 1).timestamp() + 10;
+        steps.add(SessionedLog.message(admin, ts, enc.orderEvents(54_001L, last - RING, 1_024)));
+        steps.add(SessionedLog.message(admin, ts + 1, enc.orderEvents(54_002L, last - 10, 4)));
+        steps.add(SessionedLog.message(admin, ts + 2, enc.orderEvents(54_003L, 0, 1_024)));
+        steps.add(SessionedLog.message(admin, ts + 3, enc.coreConfigRequest(56_001L)));
+        steps.add(SessionedLog.message(admin, ts + 4, enc.userBalances(55_001L, 1L)));
+        ringLog = CoreShadowRig.write(fixture, steps, -1, 0, 0).frames();
+        System.out.println("[ring] corpus with the limits record and " + QUERIES + " queries: " + ringLog.size() + " frames, eventSeq "
+                + last + ", ring " + RING);
+        return ringLog;
+    }
+
+    /** The events a member emitted from {@code mark} on, with the replayed record bytes (record text, not the render). */
+    private static List<String> repliesFrom(final Engines engines, final CoreLogApplier a, final int mark) {
+        final List<CoreEngineEvent> events = engines.sinks.get(a).recording.events();
+        final List<String> out = new ArrayList<>();
+        for (int i = mark; i < events.size(); i++) {
+            out.add(events.get(i).toString());
+        }
+        return out;
+    }
+
+    /**
+     * The replies of the last {@link #QUERIES} frames on a member restored through each path against a member that
+     * replayed the whole log. {@code afterRestore} is the control's hook (a no-op in the row). Returns the baseline
+     * replies. Throws {@code replies differ after restore (<path>)}.
+     */
+    static List<String> assertRepliesEqualAfterRestore(final java.util.function.Consumer<CoreLogApplier> afterRestore) {
+        final RecordedLog log = ringLog();
+        final long[] ends = log.positions();
+        final int n = ends.length;
+        final long queryStart = ends[n - 1 - QUERIES];
+        // three images close to the end: fewer events follow them than the ring holds, so what the queries read comes
+        // from the restored ring and not from frames applied after the restore
+        final int tail = n - 1 - QUERIES;
+        final int[] at = {tail - 30, tail - 20, tail - 10};
+        final ExpandableArrayBuffer buf = new ExpandableArrayBuffer(1 << 20);
+        final Engines engines = new Engines();
+        final CoreLogApplier base = engines.get();
+        base.genesis();
+        final ClusterLogListener baseIn = MemberModel.entries(base);
+        final byte[][] img = new byte[at.length][];
+        long prev = -1;
+        for (int k = 0; k < at.length; k++) {
+            log.replay(prev, ends[at[k]], baseIn);
+            prev = ends[at[k]];
+            assertEquals("the ring has wrapped before image " + k, RING, base.engine().orders().eventRing().count());
+            img[k] = MemberModel.image(base, buf);
+        }
+        log.replay(prev, queryStart, baseIn);
+        final int baseMark = engines.sinks.get(base).recording.events().size();
+        log.replay(queryStart, Long.MAX_VALUE, baseIn);
+        final List<String> expected = repliesFrom(engines, base, baseMark);
+
+        // {path, image index s, snapshot index c}: FULL and EQUAL restore an image at the position the member resumes
+        // from (its own full snapshot, or a shadow at exactly that position); SKIP an image above it; TAIL one below it
+        final Object[][] paths = {{"FULL", 1, 1}, {"EQUAL", 2, 2}, {"SKIP", 2, 0}, {"TAIL", 0, 2}};
+        for (final Object[] p : paths) {
+            final int si = (Integer) p[1];
+            final int ci = (Integer) p[2];
+            final long s = ends[at[si]];
+            final long c = ends[at[ci]];
+            final CoreLogApplier a = engines.get();
+            a.restore(new UnsafeBuffer(img[si]), img[si].length);
+            a.stampLogPosition(s);
+            afterRestore.accept(a);
+            final ClusterLogListener in = MemberModel.entries(a);
+            final int mark;
+            if (s > c) {
+                final ClusterLogListener gated = SkipWindow.gate(new SkipWindow(s), in);
+                log.replay(c, queryStart, gated);
+                mark = engines.sinks.get(a).recording.events().size();
+                log.replay(queryStart, Long.MAX_VALUE, gated);
+            } else {
+                log.replay(s, queryStart, in); // the tail (s, c] and then the live frames
+                mark = engines.sinks.get(a).recording.events().size();
+                log.replay(queryStart, Long.MAX_VALUE, in);
+            }
+            final List<String> got = repliesFrom(engines, a, mark);
+            if (!expected.equals(got)) {
+                throw new AssertionError("replies differ after restore (" + p[0] + " s=" + s + " c=" + c + "): "
+                        + MemberModel.firstDifference(expected, got));
+            }
+        }
+        return expected;
+    }
+
+    /**
+     * Every restore path gives the replay reply and the config report a member that replayed the log gives, byte for
+     * byte, with the ring wrapped and a limits record applied. The pair sweep of the rows above runs on this log too,
+     * where the final image carries the ring and the limits sections.
+     */
+    @Test
+    public void theEventRingAndTheLimitsRecordAnswerTheSameAfterEveryRestorePath() {
+        final List<String> replies = assertRepliesEqualAfterRestore(a -> { });
+        final long replayed = replies.stream().filter(r -> r.startsWith("OrderEventReplay[")).count();
+        assertEquals("the whole ring and a page of four were replayed: " + replies.size() + " reply events", RING + 4, replayed);
+        assertEquals("three terminators", 3, replies.stream().filter(r -> r.startsWith("OrderEventsEnd[")).count());
+        assertTrue("the overrun names the first available event: " + replies,
+                replies.stream().anyMatch(r -> r.startsWith("OrderEventsEnd[correlationId=54003, count=0,")));
+        assertTrue("the config report carries the limits record: " + replies, replies.stream().anyMatch(r ->
+                r.startsWith("CoreConfigReport[") && r.contains("limitsVersion=1, requestTtlMs=600000, requestPerUserCap=200, "
+                        + "orderEventRingCapacity=" + RING)));
+        assertTrue(replies.stream().anyMatch(r -> r.startsWith("UserBalances[correlationId=55001, userId=1")));
+
+        final Engines engines = new Engines();
+        final ShadowRestoreRunner.Report r = ShadowRestoreRunner.run(engines, ringLog(), STRIDE,
+                ShadowRestoreRunner.Variant.PRODUCTION, engines.probe());
+        assertTrue("every path exercised: " + r, r.equal() > 0 && r.skip() > 0 && r.tail() > 0);
+        final int[] counts = MemberModel.run(ringLog(), STRIDE, SkipWindow::new);
+        assertTrue("every path exercised in the member model", counts[0] > 0 && counts[1] > 0 && counts[2] > 0);
+        System.out.println("GREEN ring and limits: replies equal on FULL, EQUAL, SKIP, TAIL; pair sweep " + r + "; member model equal="
+                + counts[0] + " skip=" + counts[1] + " tail=" + counts[2]);
+    }
+
+    /** Control: a member restored without the ring's records (the section not written) answers differently. */
+    @Test
+    public void controlARestoreThatLosesTheRingChangesTheReplies() {
+        CoreShadowRig.nc("ring-section-not-written", "replies differ after restore", () -> assertRepliesEqualAfterRestore(a -> {
+            final com.openexchange.core.application.engine.order.OrderEventRing ring = a.engine().orders().eventRing();
+            final int capacity = ring.capacity();
+            ring.resize(0);
+            ring.resize(capacity);
+        }));
+    }
+
     /**
      * (c) a tail reader that drops the SessionOpen principal: the applier's own principal gate refuses the open
      * (ENGINE_FAILED), so the session never reaches a state where its later frames are rejected NO_AUTHORITY.

@@ -10,14 +10,19 @@ import java.util.function.Consumer;
 
 /**
  * The replicated requestId table (lifecycle B6, critic D5): (userId, requestId) → the decision the core
- * took, kept for a TTL on the single deadline index and capped per user. A replay with an equal payload
+ * took, kept for a TTL on the single deadline index and capped per user (both from the replicated limits record). A replay with an equal payload
  * fingerprint returns the stored decision; a different fingerprint is REQUEST_ID_PAYLOAD_MISMATCH. Layout
  * section 6, ascending (userId, high, low).
  */
 public final class RequestTable {
 
-    public static final long TTL_MS = 15 * 60_000L;
-    public static final int PER_USER_CAP = 256;
+    /**
+     * The genesis values of the limits record. The live TTL and cap are the record's
+     * ({@code CoreLimits}, set by CoreLimitsSet); nothing in the engine reads these two after genesis.
+     */
+    public static final long DEFAULT_TTL_MS = com.openexchange.core.application.engine.config.CoreLimits.DEFAULT_REQUEST_TTL_MS;
+    public static final int DEFAULT_PER_USER_CAP =
+            com.openexchange.core.application.engine.config.CoreLimits.DEFAULT_REQUEST_PER_USER_CAP;
     public static final int ENTRY_BYTES = 8 * 3 + 8 + 8 + 8 + 8 + 1 + 1;
 
     /** Kind of command the decision belongs to (byte). */

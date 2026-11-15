@@ -37,7 +37,7 @@ final class FrameReplica {
     private FrameReplica(final CoreEngine engine) {
         this.engine = engine;
         // The v3 story runs behaviour 3, which the jar supports only through this test seam (node-local)
-        engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        engine.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         engine.setEventSink(sink);
         engine.setConfigFailFast(() -> failFastCalls++);
         demuxer = new CoreSbeDemuxer(engine, new SettlementProjector(engine));
@@ -48,7 +48,7 @@ final class FrameReplica {
         final UnsafeBuffer buffer = new UnsafeBuffer(image);
         final int payloadLength = new SnapshotEnvelope().open(buffer, image.length);
         final CoreEngine fresh = new CoreEngine();
-        fresh.coreConfig().setSupportedBehaviorVersions(1, 2, 3); // before the codec's cross-check of section 8
+        fresh.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4); // before the codec's cross-check of section 8
         final int[] failFast = new int[1];
         fresh.setConfigFailFast(() -> failFast[0]++);
         final BalanceSnapshotCodec.Decoded decoded =

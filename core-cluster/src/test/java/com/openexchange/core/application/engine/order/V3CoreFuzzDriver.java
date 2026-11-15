@@ -41,10 +41,12 @@ final class V3CoreFuzzDriver {
     private static final long ONE = V3Rig.ONE;
     private static final int C = (int) V3Genesis.ME_CAPACITY;
 
-    final V3Rig r = V3Rig.open();
+    final V3Rig r;
     private final Random rng;
     private final boolean faults;
     private final long seed;
+    private final long behavior;
+    private final boolean retries;
     private int step;
 
     // ---- the reference ME
@@ -76,10 +78,33 @@ final class V3CoreFuzzDriver {
     long legLiveInjected;
     long legZeroInjected;
     long releaseMints;
+    /** Retries of a create whose requestId the core still remembered (the stored-decision oracle ran). */
+    long retriesChecked;
+    /** Of those, retries offered while the market or GLOBAL gate was closed. */
+    long retriesUnderClosedGate;
+    /** Of those, retries of a GTD create offered after its deadline passed. */
+    long retriesPastDeadline;
+    long gateCloses;
+
+    // ---- the creates the users sent (copies taken before the apply), for retries with the same requestId
+    private final List<CreateOrderCommand> sent = new ArrayList<>();
 
     V3CoreFuzzDriver(final long seed, final boolean faults) {
+        this(seed, faults, 3, false);
+    }
+
+    /**
+     * {@code behavior} is the recorded core behaviour (3 or 4). With {@code retries} about one step in seven is drawn from
+     * the retry verbs instead: a retry of an earlier create with the same requestId and payload, an ADMIN close of the
+     * market or GLOBAL gate, or a jump past a GTD create's deadline (swept) followed by its retry. Without {@code retries}
+     * the random sequence is exactly the original one.
+     */
+    V3CoreFuzzDriver(final long seed, final boolean faults, final long behavior, final boolean retries) {
         this.seed = seed;
         this.faults = faults;
+        this.behavior = behavior;
+        this.retries = retries;
+        this.r = V3Rig.openAt(behavior);
         this.rng = new Random(seed);
         for (long u = 1; u <= 3; u++) {
             r.deposit(u, V3Rig.USD, 10_000_000 * ONE);
@@ -88,12 +113,17 @@ final class V3CoreFuzzDriver {
     }
 
     private String tag() {
-        return "seed " + seed + (faults ? " (faults)" : "") + " step " + step;
+        return "seed " + seed + (faults ? " (faults)" : "") + " behaviour " + behavior + (retries ? " (retries)" : "") + " step "
+                + step;
     }
 
     void run(final int steps) {
         for (int i = 0; i < steps; i++) {
             step = i;
+            if (retries && rng.nextInt(100) < 15) {
+                retryVerb();
+                continue;
+            }
             final int roll = rng.nextInt(100);
             if (roll < 18) {
                 userCreate();
@@ -176,7 +206,140 @@ final class V3CoreFuzzDriver {
             c.timeInForce = OrderEngine.TIF_GTD;
             c.expiresAtMs = r.now + 1_000 + rng.nextInt(20_000);
         }
+        if (retries) {
+            sent.add(copy(c));
+        }
         core(() -> r.engine.orders().applyCreate(c, r.now));
+    }
+
+    // ---------------------------------------------------------------- the retry verbs
+
+    private static CreateOrderCommand copy(final CreateOrderCommand c) {
+        final CreateOrderCommand k = new CreateOrderCommand();
+        k.reset();
+        k.correlationId = c.correlationId;
+        k.userId = c.userId;
+        k.clientOrderIdHigh = c.clientOrderIdHigh;
+        k.clientOrderIdLow = c.clientOrderIdLow;
+        k.requestIdHigh = c.requestIdHigh;
+        k.requestIdLow = c.requestIdLow;
+        k.marketId = c.marketId;
+        k.side = c.side;
+        k.orderType = c.orderType;
+        k.timeInForce = c.timeInForce;
+        k.price = c.price;
+        k.quantity = c.quantity;
+        k.budget = c.budget;
+        k.stopPrice = c.stopPrice;
+        k.trailingDelta = c.trailingDelta;
+        k.displayQty = c.displayQty;
+        k.expiresAtMs = c.expiresAtMs;
+        k.flags = c.flags;
+        return k;
+    }
+
+    private void retryVerb() {
+        final int v = rng.nextInt(3);
+        if (v == 0) {
+            if (!sent.isEmpty()) {
+                retry(sent.get(sent.size() - 1 - rng.nextInt(Math.min(sent.size(), 40))));
+            }
+        } else if (v == 1) {
+            gateClose();
+        } else {
+            pastDeadline();
+        }
+    }
+
+    /** ADMIN SUSPEND of the market gate or of GLOBAL; {@link #adminOpen} (and the drain) reopen them. */
+    private void gateClose() {
+        final int gate = rng.nextBoolean() ? V3Rig.MKT : OrderEntryGate.GLOBAL;
+        gateCloses++;
+        core(() -> r.adminGate(gate, GateState.SUSPENDED, GateReason.ADMIN));
+    }
+
+    /** Jump just past the deadline of a GTD create still in the future, sweep, then retry that create. */
+    private void pastDeadline() {
+        CreateOrderCommand gtd = null;
+        for (int i = sent.size() - 1; i >= 0 && i >= sent.size() - 40; i--) {
+            final CreateOrderCommand c = sent.get(i);
+            if (c.timeInForce == OrderEngine.TIF_GTD && c.expiresAtMs > r.now) {
+                gtd = c;
+                break;
+            }
+        }
+        if (gtd == null) {
+            return;
+        }
+        r.now = gtd.expiresAtMs + 1 + rng.nextInt(1_000);
+        core(() -> r.engine.sweep(r.now));
+        retry(gtd);
+    }
+
+    private static long[] balances(final V3Rig r) {
+        final List<Long> out = new ArrayList<>();
+        r.engine.forEachAccountByUserId(a -> {
+            out.add(a.userId());
+            for (int asset = 0; asset < com.openexchange.core.domain.Asset.count(); asset++) {
+                out.add(a.available(asset));
+                out.add(a.locked(asset));
+            }
+        });
+        final long[] b = new long[out.size()];
+        for (int i = 0; i < b.length; i++) {
+            b[i] = out.get(i);
+        }
+        return b;
+    }
+
+    /**
+     * Offer {@code original} again (same requestId, same payload). Every behaviour: the conservation set after the apply
+     * (through {@link #core}). When the core still remembers the requestId, nothing is created twice: no dispatch, no new
+     * order, no balance moves. Under behaviour 4 the answer is also exactly the stored decision, whatever the gate and the
+     * clock say now: one duplicate ack naming the stored orderId, or the stored reject.
+     */
+    private void retry(final CreateOrderCommand original) {
+        final CreateOrderCommand c = copy(original);
+        final RequestTable.Entry seen = r.engine.orders().requests().get(c.userId, c.requestIdHigh, c.requestIdLow);
+        if (seen == null) {
+            return; // forgotten (TTL or cap): a retry would be a new create, which the plain create verb already covers
+        }
+        final long storedOrder = seen.orderId;
+        final int storedReason = seen.reason & 0xFF;
+        final boolean closed = r.engine.gate().state(V3Rig.MKT) != GateState.OPEN
+                || r.engine.gate().state(OrderEntryGate.GLOBAL) != GateState.OPEN;
+        final boolean pastDeadline = c.timeInForce == OrderEngine.TIF_GTD && c.expiresAtMs <= r.now;
+        final long dispatchBefore = r.engine.getDispatchSeq();
+        final int ordersBefore = r.engine.orders().orders().size();
+        final long nextOrderBefore = r.engine.getNextOrderId();
+        final long[] balancesBefore = balances(r);
+        core(() -> r.engine.orders().applyCreate(c, r.now));
+        retriesChecked++;
+        if (closed) {
+            retriesUnderClosedGate++;
+        }
+        if (pastDeadline) {
+            retriesPastDeadline++;
+        }
+        final String what = tag() + ": retry of request " + c.requestIdLow + " (stored order " + storedOrder + " reason "
+                + storedReason + (closed ? ", gate closed" : "") + (pastDeadline ? ", past its GTD deadline" : "") + ")";
+        assertEquals(what + ": no dispatch minted", dispatchBefore, r.engine.getDispatchSeq());
+        assertEquals(what + ": no order created", ordersBefore, r.engine.orders().orders().size());
+        assertEquals(what + ": no orderId consumed", nextOrderBefore, r.engine.getNextOrderId());
+        assertTrue(what + ": no balance moved", java.util.Arrays.equals(balancesBefore, balances(r)));
+        if (behavior < 4) {
+            return;
+        }
+        final List<CoreEngineEvent.OrderAck> acks = r.all(CoreEngineEvent.OrderAck.class);
+        final List<CoreEngineEvent.OrderReject> rejects = r.all(CoreEngineEvent.OrderReject.class);
+        if (storedReason == 0) {
+            assertTrue(what + ": answered with the stored acceptance, got " + r.events(), rejects.isEmpty() && acks.size() == 1);
+            assertTrue(what + ": the ack is marked duplicate", acks.get(0).duplicate());
+            assertEquals(what + ": the ack names the stored orderId", storedOrder, acks.get(0).orderId());
+        } else {
+            assertTrue(what + ": answered with the stored reject, got " + r.events(), acks.isEmpty() && rejects.size() == 1);
+            assertEquals(what + ": the stored reject reason", storedReason, rejects.get(0).reason().code());
+        }
     }
 
     private List<CoreOrder> live() {

@@ -37,6 +37,10 @@ public class CoreSbeDemuxerQueryTest {
         assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestOrderSnapshotDecoder.TEMPLATE_ID));
         assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestPendingDispatchDecoder.TEMPLATE_ID));
         assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestRiskConfigDecoder.TEMPLATE_ID));
+        // v8: the three gateway queries
+        assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder.TEMPLATE_ID));
+        assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestUserBalancesDecoder.TEMPLATE_ID));
+        assertTrue(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RequestCoreConfigDecoder.TEMPLATE_ID));
     }
 
     @Test
@@ -58,5 +62,7 @@ public class CoreSbeDemuxerQueryTest {
         assertFalse(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.MeJournalTradeDecoder.TEMPLATE_ID));
         assertFalse(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.RegisterSessionDecoder.TEMPLATE_ID));
         assertFalse(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.OrderEntryGateDecoder.TEMPLATE_ID));
+        // the limits record changes admission and snapshot bytes: an ADMIN command, never a query
+        assertFalse(CoreSbeDemuxer.isQuery(com.openexchange.core.infrastructure.generated.CoreLimitsSetDecoder.TEMPLATE_ID));
     }
 }

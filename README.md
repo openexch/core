@@ -24,7 +24,7 @@ v1 has no user-facing gateway yet.
 
 | module | what it is | jar |
 |---|---|---|
-| `core-common` | shared kernel: money value objects and the SBE wire codecs, generated at build time from `src/main/resources/sbe/money-schema.xml` (schema id 2, version 7) and `money-journal-schema.xml` (schema id 3, version 1) | library |
+| `core-common` | shared kernel: money value objects and the SBE wire codecs, generated at build time from `src/main/resources/sbe/money-schema.xml` (schema id 2, version 8) and `money-journal-schema.xml` (schema id 3, version 1) | library |
 | `core-cluster` | the engine: domain model, deterministic engine, Aeron cluster service. Entry point `com.openexchange.core.Main` | `core-cluster/target/core-cluster.jar` |
 | `core-bridge` | Java settlement bridge: tails the matching engine's settlement journal and forwards trades and terminal order statuses into the cluster. Entry point `com.openexchange.core.bridge.BridgeMain` | `core-bridge/target/core-bridge.jar` |
 | `core-projector` | follows the money journal (an Aeron Archive recording) and projects every money movement into PostgreSQL, resumable from the PostgreSQL high-water mark. Entry point `com.openexchange.core.projector.ProjectorMain` | `core-projector/target/core-projector.jar` |

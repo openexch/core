@@ -26,3 +26,7 @@ CORECONFIG ver=2 behavior=2 tick=0.5 min=10.0 max=1000.0 lot=0.1 corr=73    # DU
 SNAPSHOT
 CREATE u=1 market=1 side=0 type=0 px=100.3 qty=1.0 rid=11                   # still behaviour 2 after the restore
 CANCEL u=1 order=1 rid=12                                                   # the v1 off-tick order is live: cancellable
+# Behaviour 3 needs a feed-virgin, globally suspended core: refused here (the gate is open and orders were dispatched).
+# So this log cannot reach 4 either: a step is never skipped.
+CORECONFIG ver=3 behavior=3 tick=0.5 min=10.0 max=1000.0 lot=0.1 corr=74    # REJECTED: the switch to 3 is refused
+CORECONFIG ver=3 behavior=4 tick=0.5 min=10.0 max=1000.0 lot=0.1 corr=75    # REJECTED: 2 to 4 skips a step

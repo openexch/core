@@ -159,8 +159,15 @@ public class CoreApplyRunnerTest {
                     runner.position());
         }
         assertTrue("seed " + seed + ": the story bound the epoch", runner.engine().feed().boundMeEpoch() == CoreFrameStory.GENESIS);
-        assertEquals("seed " + seed + ": snapshotSha256 equals FrameReplica.image() of the same story",
-                FeedFiles.sha256Hex(replica.image()), runner.result().snapshotSha256());
+        // the same log at the same positions: the production images are equal byte for byte, event ring included
+        assertEquals("seed " + seed + ": the runner's image equals FrameReplica.image() of the same story",
+                FeedFiles.sha256Hex(replica.image()), FeedFiles.sha256Hex(runner.image()));
+        // the digest the runner reports is over the same image with the retained events' log positions masked
+        assertEquals("seed " + seed + ": snapshotSha256 is the digest of the position-masked image",
+                FeedFiles.sha256Hex(runner.digestImage()), runner.result().snapshotSha256());
+        assertTrue("seed " + seed + ": the story retains order events, so the mask is not vacuous",
+                runner.engine().orders().eventRing().count() > 0
+                        && !FeedFiles.sha256Hex(runner.image()).equals(runner.result().snapshotSha256()));
     }
 
     /**

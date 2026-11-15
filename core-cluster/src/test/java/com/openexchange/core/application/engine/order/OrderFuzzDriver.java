@@ -108,7 +108,7 @@ final class OrderFuzzDriver extends OrderFuzzHarness {
         c.expiresAtMs = exp;
         opText = "CREATE u=" + u + " " + (side == 0 ? "BUY" : "SELL") + " px=" + price + " qty=" + qty + " tif=" + tif
                 + (exp > 0 ? " exp=" + exp : "");
-        final CoreRejectReason expectedReject = r.orders.requests().countFor(u) >= RequestTable.PER_USER_CAP
+        final CoreRejectReason expectedReject = r.orders.requests().countFor(u) >= RequestTable.DEFAULT_PER_USER_CAP
                 ? CoreRejectReason.TOO_MANY_PENDING_REQUESTS
                 : r.engine.account(u).available(holdAsset) < holdAmount ? CoreRejectReason.INSUFFICIENT_FUNDS : null;
         r.create(c);
@@ -399,7 +399,7 @@ final class OrderFuzzDriver extends OrderFuzzHarness {
         c.requestIdLow = nextAmendRequest++;
         c.newPrice = newPrice;
         c.newQuantity = newQty;
-        final CoreRejectReason expectedReject = r.orders.requests().countFor(o.user) >= RequestTable.PER_USER_CAP
+        final CoreRejectReason expectedReject = r.orders.requests().countFor(o.user) >= RequestTable.DEFAULT_PER_USER_CAP
                 ? CoreRejectReason.TOO_MANY_PENDING_REQUESTS
                 : delta > 0 && r.engine.account(o.user).available(o.holdAsset) < delta ? CoreRejectReason.INSUFFICIENT_FUNDS : null;
         opText = "AMEND order=" + o.id + " newPx=" + newPrice + " newQty=" + newQty + " delta=" + delta;

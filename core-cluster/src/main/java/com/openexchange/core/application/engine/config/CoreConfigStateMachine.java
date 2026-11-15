@@ -19,7 +19,7 @@ import java.util.Comparator;
 public final class CoreConfigStateMachine {
 
     /** Behaviour versions this jar can run (contract section 4c). */
-    public static final int[] SUPPORTED_BEHAVIOR_VERSIONS = {1, 2, 3}; // Behaviour 3 joins
+    public static final int[] SUPPORTED_BEHAVIOR_VERSIONS = {1, 2, 3, 4}; // Behaviour 4: the create requestId lookup runs first
     public static final int SCALE = 8;
     private static final int MAX_SYMBOL = 16;
     private static final int MAX_CODE = 8;
@@ -108,6 +108,10 @@ public final class CoreConfigStateMachine {
                 && (recorded.genesisId == 0 || !feedVirgin || globalOpen || foreignCoreHold)) {
             return Decision.INVALID;
         }
+        // The switch from 3 to 4 has no precondition: behaviour 4 moves one lookup in the create path and touches no
+        // hold, no feed rule and no gate bit, so it may be taken with the gate open and orders live; every rule that
+        // holds from 3 on holds under 4. A genesis reaches 4 by the same ladder as any other version (ADOPT at 1, then
+        // one SWITCH per step, the step to 3 under its own preconditions above): no config is ADOPTED at 4 directly.
         return c.behaviorVersion == recorded.behaviorVersion + 1 ? Decision.SWITCH : Decision.INVALID;
     }
 

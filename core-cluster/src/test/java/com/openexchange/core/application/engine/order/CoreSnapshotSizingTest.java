@@ -104,17 +104,18 @@ public class CoreSnapshotSizingTest {
         final com.openexchange.core.application.engine.feed.V3Rig r = com.openexchange.core.application.engine.feed.V3Rig.bound();
         final ExpandableArrayBuffer out = new ExpandableArrayBuffer();
         final int length = BalanceSnapshotCodec.serialize(r.engine, out, 0);
-        final long v2Shape = expectedImageBytes(0, 0, 0, 0, Market.ALL.length, Asset.count());
+        final long v2Shape = expectedImageBytes(0, 0, 0, 0, Market.ALL.length, Asset.count(), 0);
         // section 10 layout v2 (3.8): 92-byte head + freshDigest 8 + digestCount 4 + one digest per entry (cursor 1)
         // Section 12 FEED_HALTS (24-byte head, no record here)
         assertEquals("v3 = the v1/v2 layout + section 10 (92 + 12 + 8 bytes) + section 11 (16-byte head) + section 12 (24-byte head)",
                 v2Shape + SECTION_HEADER_BYTES + 92 + 12 + 8 + SECTION_HEADER_BYTES + 16 + SECTION_HEADER_BYTES + 24, length);
         final CoreEngine restored = new CoreEngine();
-        restored.coreConfig().setSupportedBehaviorVersions(1, 2, 3);
+        restored.coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         restored.setEventSink(new QuietSink());
         final BalanceSnapshotCodec.Decoded decoded = BalanceSnapshotCodec.deserialize(new UnsafeBuffer(out.byteArray(), 0, length),
                 0, length, restored);
-        assertEquals("sections (1..6, 8 CORE_CONFIG, 9 SESSIONS, 10 FEED_STATE, 11 ME_LINK, 12 FEED_HALTS)", 11, decoded.sectionCount);
+        assertEquals("sections (1..6, 8 CORE_CONFIG, 9 SESSIONS, 10 FEED_STATE, 11 ME_LINK, 12 FEED_HALTS, 13 LIMITS, "
+                + "14 ORDER_EVENT_RING)", 13, decoded.sectionCount);
     }
 
     @Test
@@ -156,7 +157,10 @@ public class CoreSnapshotSizingTest {
         assertEquals("one hold per live order", orders, holds);
 
         // ---- expected image size from the counts, per section
-        final long expected = expectedImageBytes(users, orders, holds, orders, Market.ALL.length, Asset.count());
+        // the event ring holds the newest events up to its capacity: at 100 000 orders the default ring is full
+        final int ringEvents = (int) Math.min(src.getEventSeq(), src.limits().orderEventRingCapacity());
+        assertEquals("the ring holds what the limits record allows", ringEvents, src.orders().eventRing().count());
+        final long expected = expectedImageBytes(users, orders, holds, orders, Market.ALL.length, Asset.count(), ringEvents);
 
         ExpandableArrayBuffer out = new ExpandableArrayBuffer((int) Math.min(Integer.MAX_VALUE - 64, expected + 64));
         final long s0 = System.nanoTime();
@@ -178,7 +182,7 @@ public class CoreSnapshotSizingTest {
                 0, length, restored);
         final long d1 = System.nanoTime();
         assertEquals("deserialize consumes exactly the payload", length, decoded.bytesConsumed);
-        assertEquals("sections (1..6, 8 CORE_CONFIG, 9 SESSIONS)", 8, decoded.sectionCount);
+        assertEquals("sections (1..6, 8 CORE_CONFIG, 9 SESSIONS, 13 LIMITS, 14 ORDER_EVENT_RING)", 10, decoded.sectionCount);
         assertEquals("restored accounts", users, decoded.accountCount);
         assertEquals("restored holds", holds, decoded.holdCount);
 
@@ -231,8 +235,12 @@ public class CoreSnapshotSizingTest {
 
     /** The declared layout: every term is (count x row) from the layout page, plus fixed section bodies. */
     static long expectedImageBytes(final int users, final int orders, final int holds, final int requestRows,
-                                   final int configMarkets, final int configAssets) {
-        final int sections = 8; // 1 ACCOUNTS, 2 ORDERS, 3 USER_RISK, 4 MARKET_STATE, 5 GATES, 6 REQUEST_IDS, 8 CORE_CONFIG, 9 SESSIONS
+                                   final int configMarkets, final int configAssets, final int ringEvents) {
+        // 1 ACCOUNTS, 2 ORDERS, 3 USER_RISK, 4 MARKET_STATE, 5 GATES, 6 REQUEST_IDS, 8 CORE_CONFIG, 9 SESSIONS, 13 LIMITS,
+        // 14 ORDER_EVENT_RING
+        final int sections = 10;
+        final long limits = 8 + 8 + 4 + 4;                       // version, requestTtlMs, requestPerUserCap, ring capacity
+        final long eventRing = 4 + 8 + 4 + (long) ringEvents * 167; // capacity, firstSeq, count, then 167 bytes per event
         final long accounts = 4 + (long) users * ACCOUNT_ROW_BYTES + (long) holds * HOLD_ROW_BYTES;
         final long orderSection = 4 + (long) orders * ORDER_BYTES;
         final long userRisk = 4 + (long) users * USER_RISK_BYTES;
@@ -243,7 +251,7 @@ public class CoreSnapshotSizingTest {
         final long config = 8 + 8 + 8 + 4 + (long) configMarkets * CONFIG_MARKET_BYTES + 4 + (long) configAssets * CONFIG_ASSET_BYTES;
         final long sessions = 4; // in-process: no session authorities
         return HEADER_BYTES + (long) sections * SECTION_HEADER_BYTES
-                + accounts + orderSection + userRisk + marketState + gates + requests + config + sessions;
+                + accounts + orderSection + userRisk + marketState + gates + requests + config + sessions + limits + eventRing;
     }
 
     // ---------------------------------------------------------------- the build

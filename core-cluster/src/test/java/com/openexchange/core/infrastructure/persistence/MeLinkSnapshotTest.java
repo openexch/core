@@ -188,11 +188,8 @@ public class MeLinkSnapshotTest {
     public void section11BelowV3Refused() {
         final V3Rig v2 = V3Rig.v2();
         final byte[] img = image(v2.engine);
-        final byte[] longer = Arrays.copyOf(img, img.length + 6 + 16);
-        final UnsafeBuffer b = new UnsafeBuffer(longer);
-        b.putShort(img.length, BalanceSnapshotCodec.SECTION_ME_LINK);
-        b.putInt(img.length + 2, 16);
-        b.putInt(HEADER - 4, b.getInt(HEADER - 4) + 1);
+        // spliced in where section 11 belongs: before the limits record (13), which with the event ring ends the image
+        final byte[] longer = FeedStateSnapshotTest.appendSection(img, BalanceSnapshotCodec.SECTION_ME_LINK, new byte[16]);
         final IllegalStateException e = assertThrows(IllegalStateException.class, () -> {
             final CoreEngine x = new CoreEngine();
             x.setEventSink(new RecordingCoreSink());

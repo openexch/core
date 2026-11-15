@@ -118,6 +118,9 @@ public final class CoreEngine {
     private final OrderEntryGate gate = new OrderEntryGate();
     /** Order lifecycle, risk and the requestId table (sections 2, 3, 4, 6). */
     private final OrderEngine orders = new OrderEngine(this);
+    /** The replicated limits record: request TTL, per-user request cap, order-event ring capacity. Snapshotted. */
+    private final com.openexchange.core.application.engine.config.CoreLimits limits =
+            new com.openexchange.core.application.engine.config.CoreLimits();
     /** Commands refused for session authority (class, scope, registration). Alarm target, not snapshotted. */
     private long unauthorisedCount = 0L;
     /** The log position of the entry being applied; set by the service, carried on control egress. Transient. */
@@ -905,6 +908,8 @@ public final class CoreEngine {
         final var decision = coreConfig.decide(c, gate.state(OrderEntryGate.GLOBAL) == GateState.OPEN, feedVirgin(),
                 foreignCoreHold);
         final long version = coreConfig.apply(decision, c);
+        // The step to 3 converts the gate to its reason set. The step from 3 to 4 changes no state at all: the set is
+        // already in place and the new behaviour only reorders the create path's requestId lookup.
         if (decision == com.openexchange.core.application.engine.config.CoreConfigStateMachine.Decision.SWITCH
                 && c.behaviorVersion == 3) {
             gate.convertToReasonSet(); // Same apply as the switch, no egress
@@ -928,6 +933,104 @@ public final class CoreEngine {
             sink.onConfigApplied(com.openexchange.core.domain.ConfigKind.CORE, 0, version, logPosition);
             crossCheckConfigOrFail(decision.name());
         }
+    }
+
+    // ---- the limits record and the gateway queries ----
+
+    /** The replicated limits record. */
+    public com.openexchange.core.application.engine.config.CoreLimits limits() {
+        return limits;
+    }
+
+    /**
+     * CoreLimitsSet (77), ADMIN class, every behaviour. A structurally invalid record is REJECTED INVALID; an equal
+     * version with equal values is DUPLICATE; a version at or below the recorded one is STALE; otherwise the record is
+     * taken at this log position: the TTL for requests remembered from now on, the cap at once (nothing is evicted), and
+     * the ring is resized keeping its newest events. Reply AdminAck then ConfigApplied{LIMITS, market 0}.
+     */
+    public void applyCoreLimitsSet(final long correlationId, final long configVersion, final long requestTtlMs,
+                                   final int requestPerUserCap, final int orderEventRingCapacity, final long timestamp) {
+        observeLogTime(timestamp);
+        final var decision = limits.decide(configVersion, requestTtlMs, requestPerUserCap, orderEventRingCapacity);
+        switch (decision) {
+            case INVALID:
+                sink.onAdminAck(correlationId, 77, AdminResult.REJECTED, CoreRejectReason.INVALID.code(), limits.version());
+                return;
+            case DUPLICATE:
+                sink.onAdminAck(correlationId, 77, AdminResult.DUPLICATE, 0, limits.version());
+                return;
+            case STALE:
+                sink.onAdminAck(correlationId, 77, AdminResult.STALE, 0, limits.version());
+                return;
+            default:
+                break;
+        }
+        limits.set(configVersion, requestTtlMs, requestPerUserCap, orderEventRingCapacity);
+        orders.eventRing().resize(orderEventRingCapacity);
+        sink.onAdminAck(correlationId, 77, AdminResult.ACCEPTED, 0, limits.version());
+        sink.onConfigApplied(com.openexchange.core.domain.ConfigKind.LIMITS, 0, limits.version(), logPosition);
+    }
+
+    /** Restore the limits record (snapshot section); the ring section that follows carries its own capacity. */
+    public void restoreLimits(final long version, final long requestTtlMs, final int requestPerUserCap,
+                              final int orderEventRingCapacity) {
+        limits.set(version, requestTtlMs, requestPerUserCap, orderEventRingCapacity);
+    }
+
+    /**
+     * RequestUserBalances (55), ORIGIN-only reply, read-only: the user's balance lines and whether an account record
+     * exists. Asking about a user never creates an account.
+     */
+    public void requestUserBalances(final long correlationId, final long userId) {
+        final Account account = accounts.get(userId);
+        sink.onUserBalances(correlationId, userId, account != null, logPosition, account);
+    }
+
+    /**
+     * RequestCoreConfig (56), ORIGIN-only reply, read-only: the recorded config, the limits record, the global gate and
+     * per market the risk limits a client needs with the market's own gate and breaker state.
+     */
+    public void requestCoreConfig(final long correlationId) {
+        sink.onCoreConfigReport(correlationId, configReport, logPosition);
+    }
+
+    private final com.openexchange.core.domain.CoreConfigReportView configReport = new ConfigReport();
+
+    /** A live view over the recorded state; valid during the sink call only. */
+    private final class ConfigReport implements com.openexchange.core.domain.CoreConfigReportView {
+        private com.openexchange.core.domain.commands.CoreConfigCommand.MarketDef market(final int index) {
+            return coreConfig.recorded().markets[index];
+        }
+
+        @Override public long configVersion() { return coreConfig.recorded() == null ? 0L : coreConfig.recorded().configVersion; }
+        @Override public long behaviorVersion() { return coreConfig.behaviorVersion(); }
+        @Override public long limitsVersion() { return limits.version(); }
+        @Override public long requestTtlMs() { return limits.requestTtlMs(); }
+        @Override public int requestPerUserCap() { return limits.requestPerUserCap(); }
+        @Override public int orderEventRingCapacity() { return limits.orderEventRingCapacity(); }
+        @Override public int gateStateCode() { return gate.state(OrderEntryGate.GLOBAL).code(); }
+        @Override public int gateReasons() { return gate.reasons(OrderEntryGate.GLOBAL); }
+        @Override public int marketCount() { return coreConfig.recorded() == null ? 0 : coreConfig.recorded().markets.length; }
+        @Override public int marketId(final int index) { return market(index).marketId(); }
+        @Override public String symbol(final int index) { return market(index).symbol(); }
+        @Override public int baseAssetId(final int index) { return market(index).baseAssetId(); }
+        @Override public int quoteAssetId(final int index) { return market(index).quoteAssetId(); }
+        @Override public long tickSize(final int index) { return market(index).tickSize(); }
+        @Override public long minPrice(final int index) { return market(index).minPrice(); }
+        @Override public long maxPrice(final int index) { return market(index).maxPrice(); }
+        @Override public long lotSize(final int index) { return market(index).lotSize(); }
+        @Override public long minQuantity(final int index) { return orders.market(market(index).marketId()).minQuantity; }
+        @Override public long maxQuantity(final int index) { return orders.market(market(index).marketId()).maxQuantity; }
+        @Override public long minNotional(final int index) { return orders.market(market(index).marketId()).minNotional; }
+        @Override public long maxNotional(final int index) { return orders.market(market(index).marketId()).maxNotional; }
+        @Override public long riskConfigVersion(final int index) { return orders.market(market(index).marketId()).configVersion; }
+        @Override public int marketGateStateCode(final int index) { return gate.state(market(index).marketId()).code(); }
+        @Override public int marketGateReasons(final int index) { return gate.reasons(market(index).marketId()); }
+        @Override public boolean circuitBreaker(final int index) { return orders.market(market(index).marketId()).breakerTripped; }
+        @Override public int assetCount() { return coreConfig.recorded() == null ? 0 : coreConfig.recorded().assets.length; }
+        @Override public int assetId(final int index) { return coreConfig.recorded().assets[index].assetId(); }
+        @Override public String assetCode(final int index) { return coreConfig.recorded().assets[index].code(); }
+        @Override public int assetScale(final int index) { return coreConfig.recorded().assets[index].scale(); }
     }
 
     /**

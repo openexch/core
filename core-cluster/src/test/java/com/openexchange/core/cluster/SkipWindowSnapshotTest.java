@@ -129,6 +129,12 @@ public class SkipWindowSnapshotTest {
      * SKIP from P_s, and the replayed same-term action at P_x falls inside its skip window.
      */
     private static Window skipWindowStory(final ShadowClusterRig rig, final String... faultsOnRestart) throws Exception {
+        return skipWindowStory(rig, false, faultsOnRestart);
+    }
+
+    /** As above; {@code withEventRing} records a limits record with a small ring and wraps it before snapshot #1. */
+    private static Window skipWindowStory(final ShadowClusterRig rig, final boolean withEventRing,
+                                          final String... faultsOnRestart) throws Exception {
         for (final Member m : rig.members) {
             m.settings = StubStory.shadow();
         }
@@ -141,6 +147,9 @@ public class SkipWindowSnapshotTest {
         rig.adopt(admin);
         final Client tool = rig.connect(SessionClass.TOOL, g);
         tool.deposits(200);
+        if (withEventRing) {
+            rig.wrapEventRing(admin, g);
+        }
         final long pCm = rig.snapshotAll();
         tool.deposits(40);
         final long pX = rig.snapshotAll();
@@ -184,6 +193,23 @@ public class SkipWindowSnapshotTest {
         } catch (final AssertionError differs) {
             throw new AssertionError("final image differs from baseline after restore from P_x (double apply) [" + label
                     + "]: " + differs.getMessage() + "; restore lines " + w.rig().tee.lines);
+        }
+    }
+
+    /**
+     * The event ring and the limits record through the skip window: the follower restores a shadow above its snapshot
+     * (SKIP), snapshots inside the window, and restarts once more from that group. After each restart the replay reply
+     * and the config report it emits are byte-equal to the leader's.
+     */
+    @Test
+    public void aWrappedEventRingAndTheLimitsRecordSurviveTheSkipWindow() throws Exception {
+        try (ShadowClusterRig rig = new ShadowClusterRig(22300, "ring-limits-skip-window")) {
+            final Window w = skipWindowStory(rig, true);
+            RestoreDrillDryRun.requirePathLine(rig.tee, "SKIP P_s=" + w.pS(), "ring skip window");
+            final Client admin = rig.connect(SessionClass.ADMIN, w.leader());
+            rig.assertRepliesEqualAfterRestore(w.leader(), w.f(), admin, "SKIP with a snapshot inside the window");
+            restartFromPx(w, "ring");
+            rig.assertRepliesEqualAfterRestore(w.leader(), w.f(), admin, "restart from the group written inside the window");
         }
     }
 

@@ -36,7 +36,9 @@ import java.nio.file.Path;
  *                                                 {@code upto} (zeros without it), u32 n, the n live dump lines (UTF-8, \n)
  * 9   ADMIN_OPEN  [i32 market]               ACK: u16 length + the AdminAck (110) of OrderEntryGate OPEN (GLOBAL by default)
  * </pre>
- * The snapshot hash covers the gate bits. Since 4R a healed GAP clears BRIDGE_HALT by itself (the reach-clear
+ * The snapshot hash covers the gate bits. Every snapshotSha256 here (READY and RESULT) is the digest of the image with
+ * the logPosition of every retained order event zeroed ({@link CoreApplyRunner#digestImage()}), not of the production
+ * image. Since 4R a healed GAP clears BRIDGE_HALT by itself (the reach-clear
  * reopens the gate), so a healed run equals the clean run's hash; a SOURCE_SCHEMA / SETTLE_REFUSED heal keeps the bit
  * until an ADMIN OPEN (ADMIN_OPEN below).
  *
