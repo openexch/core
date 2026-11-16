@@ -675,6 +675,92 @@ public class WireRoundTripTest {
         assertEquals(64, i);
     }
 
+    /**
+     * WithdrawReject (14) carries the v6 {@code duplicate} flag. The publisher must write it on every frame: the
+     * scratch buffer is reused, so an unwritten field ships whatever byte the previous frame left there, and a strict
+     * decoder refuses it ({@code bad_value duplicate}). Over a dirty scratch the field must decode FALSE, never the
+     * leftover byte.
+     */
+    @Test
+    public void withdrawRejectWritesDuplicateOverADirtyScratch() {
+        final RawEgress egress = new RawEgress();
+        final CoreEventPublisher p = new CoreEventPublisher(egress, () -> false);
+        final int at = MessageHeaderEncoder.ENCODED_LENGTH + WithdrawRejectDecoder.duplicateEncodingOffset();
+        final UnsafeBuffer dirty = dirtyScratch(p, egress);
+        // precondition: the duplicate byte starts over a value that is neither FALSE nor TRUE
+        final int stale = dirty.getByte(at) & 0xFF;
+        assertTrue("dirty scratch byte at duplicate = " + stale, stale != 0 && stale != 1);
+
+        p.onWithdrawReject(7L, 2L, 0, 100L, com.openexchange.core.domain.RejectReason.INSUFFICIENT_FUNDS);
+        final UnsafeBuffer f = egress.last();
+        assertEquals(WithdrawRejectDecoder.TEMPLATE_ID, headerOf(f).templateId());
+        final WithdrawRejectDecoder d = new WithdrawRejectDecoder().wrapAndApplyHeader(f, 0, headerOf(f));
+        assertEquals(30, headerOf(f).blockLength());
+        assertEquals("duplicate raw byte", BoolFlag.FALSE.value(), d.duplicateRaw());
+        assertEquals(BoolFlag.FALSE, d.duplicate());
+        assertEquals(7L, d.correlationId());
+        assertEquals(com.openexchange.core.infrastructure.generated.RejectReason.INSUFFICIENT_FUNDS, d.reason());
+    }
+
+    /**
+     * The same flag through the real engine with requestIds. Money commands remember only ACCEPTED decisions
+     * (CoreEngine.applyWithdraw), so no WithdrawReject ever replays a stored decision: a refused withdrawal retried
+     * under the same requestId is decided afresh, and a payload mismatch against a remembered accept is a fresh
+     * refusal. Every WithdrawReject is duplicate FALSE; only the replayed accept (WithdrawAck) is duplicate TRUE.
+     */
+    @Test
+    public void withdrawRejectDuplicateIsFalseForFreshAndRetriedRejectsThroughTheEngine() {
+        final CoreEngine engine = new CoreEngine();
+        final RawEgress egress = new RawEgress();
+        engine.setEventSink(new CoreEventPublisher(egress, () -> false));
+        final CoreSbeDemuxer demuxer = new CoreSbeDemuxer(engine, new SettlementProjector(engine));
+        final int usd = Asset.USD.id();
+        final long u = 300L;
+
+        depositReq(demuxer, 1, u, usd, FixedPoint.fromDouble(1000.0), 9L, 1L);
+        // fresh reject: more than the balance
+        withdrawReq(demuxer, 2, u, usd, FixedPoint.fromDouble(5000.0), 9L, 2L);
+        assertWithdrawReject(egress.last(), 2L, "INSUFFICIENT_FUNDS", BoolFlag.FALSE);
+        // the same requestId and payload again: refusals are not remembered, so this is a fresh decision too
+        withdrawReq(demuxer, 3, u, usd, FixedPoint.fromDouble(5000.0), 9L, 2L);
+        assertWithdrawReject(egress.last(), 3L, "INSUFFICIENT_FUNDS", BoolFlag.FALSE);
+        // an accepted withdrawal is remembered ...
+        withdrawReq(demuxer, 4, u, usd, FixedPoint.fromDouble(10.0), 9L, 3L);
+        // ... its exact retry replays the stored accept: WithdrawAck duplicate TRUE (the sibling)
+        withdrawReq(demuxer, 5, u, usd, FixedPoint.fromDouble(10.0), 9L, 3L);
+        final UnsafeBuffer ack = egress.last();
+        assertEquals(WithdrawAckDecoder.TEMPLATE_ID, headerOf(ack).templateId());
+        final WithdrawAckDecoder wa = new WithdrawAckDecoder().wrapAndApplyHeader(ack, 0, headerOf(ack));
+        assertEquals(5L, wa.correlationId());
+        assertEquals(BoolFlag.TRUE, wa.duplicate());
+        // ... and another payload under that requestId is a fresh refusal, not a replay
+        withdrawReq(demuxer, 6, u, usd, FixedPoint.fromDouble(11.0), 9L, 3L);
+        assertWithdrawReject(egress.last(), 6L, "REQUEST_ID_MISMATCH", BoolFlag.FALSE);
+        // an unknown user: fresh reject without an account
+        withdrawReq(demuxer, 7, 301L, usd, FixedPoint.fromDouble(1.0), 9L, 4L);
+        assertWithdrawReject(egress.last(), 7L, "INSUFFICIENT_FUNDS", BoolFlag.FALSE);
+    }
+
+    private static void assertWithdrawReject(final UnsafeBuffer f, final long corr, final String reason, final BoolFlag dup) {
+        assertEquals(WithdrawRejectDecoder.TEMPLATE_ID, headerOf(f).templateId());
+        final WithdrawRejectDecoder d = new WithdrawRejectDecoder().wrapAndApplyHeader(f, 0, headerOf(f));
+        assertEquals(corr, d.correlationId());
+        assertEquals(reason, d.reason().name());
+        assertEquals("WithdrawReject corr=" + corr + " duplicate raw byte", dup.value(), d.duplicateRaw());
+    }
+
+    private void depositReq(CoreSbeDemuxer demuxer, long corr, long userId, int assetId, long amount, long high, long low) {
+        depositEncoder.wrapAndApplyHeader(ingress, 0, header)
+                .correlationId(corr).userId(userId).assetId(assetId).amount(amount).requestIdHigh(high).requestIdLow(low);
+        demuxer.dispatchTrusted(ingress, 0, MessageHeaderEncoder.ENCODED_LENGTH + depositEncoder.encodedLength(), 1000L);
+    }
+
+    private void withdrawReq(CoreSbeDemuxer demuxer, long corr, long userId, int assetId, long amount, long high, long low) {
+        withdrawEncoder.wrapAndApplyHeader(ingress, 0, header)
+                .correlationId(corr).userId(userId).assetId(assetId).amount(amount).requestIdHigh(high).requestIdLow(low);
+        demuxer.dispatchTrusted(ingress, 0, MessageHeaderEncoder.ENCODED_LENGTH + withdrawEncoder.encodedLength(), 1000L);
+    }
+
     /** 4.6: the publisher writes the value of every appended egress field, over a dirty scratch buffer. */
     @Test
     public void publisherWritesTheS1ValuesOfTheV7Tails() {
