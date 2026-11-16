@@ -261,10 +261,17 @@ public final class CoreEventPublisher implements CoreEventSink {
         flush(settlementAppliedEncoder.encodedLength(), CH_SETTLEMENTS, Routing.BROADCAST);
     }
 
+    /**
+     * {@code duplicate} (v6) is always FALSE: money commands remember only ACCEPTED decisions, so a reject is never
+     * the replay of a stored decision (a refused withdrawal retried under its requestId is decided afresh, and a
+     * payload mismatch is a fresh refusal). The field is written on every frame: the scratch buffer is reused, and an
+     * unwritten byte would carry the previous frame's leftover.
+     */
     @Override
     public void onWithdrawReject(long correlationId, long userId, int assetId, long amount, RejectReason reason) {
         withdrawRejectEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
-                .correlationId(correlationId).userId(userId).assetId(assetId).amount(amount).reason(toSbe(reason));
+                .correlationId(correlationId).userId(userId).assetId(assetId).amount(amount).reason(toSbe(reason))
+                .duplicate(BoolFlag.FALSE);
         flush(withdrawRejectEncoder.encodedLength(), CH_ACKS, Routing.ORIGIN);
     }
 
