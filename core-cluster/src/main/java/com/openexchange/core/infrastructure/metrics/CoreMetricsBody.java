@@ -128,8 +128,15 @@ public final class CoreMetricsBody {
                 "gauge", metrics.lastSnapshotBytes());
         appendSeries(sb, "core_snapshot_last_chunks Aeron messages the last snapshot was offered as (-1 = never)",
                 "gauge", metrics.lastSnapshotChunks());
-        appendSeries(sb, "core_snapshot_last_log_position Cluster log position of the last snapshot (-1 = never)",
-                "gauge", metrics.lastSnapshotLogPosition());
+        final CoreNodeMetrics.SnapshotIdentity snapshot = metrics.snapshotIdentity(); // one read: never a torn pair
+        appendSeries(sb, "core_snapshot_last_log_position Cluster log position of the last snapshot this node took, "
+                + "or restored a full image from (-1 = never)", "gauge", snapshot.logPosition());
+        if (snapshot.hasHash()) {
+            // Omitted, not -1, when unknown (no snapshot yet, or a stub): equal placeholders must not read as equal state
+            appendSeries(sb, "core_snapshot_state_hash CRC32C of the payload of the snapshot at "
+                    + "core_snapshot_last_log_position, unsigned decimal; equal on every healthy member "
+                    + "running the same snapshot layout", "gauge", snapshot.stateHash());
+        }
         appendSecondsGauge(sb, "core_snapshot_last_serialize_seconds",
                 "Service-thread time to serialize the ledger for the last snapshot (-1 = never)",
                 metrics.lastSnapshotSerializeNanos());

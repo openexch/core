@@ -25,6 +25,12 @@ import java.math.BigDecimal;
  * per-command work is microseconds, two {@code System.nanoTime()} calls are tens of nanoseconds,
  * so the default is exact and the knob exists for the day it is not. The effective value is
  * exported as {@code core_apply_sample_shift}.</p>
+ *
+ * <p>Snapshot identity: the last snapshot's log position and state hash are ONE immutable
+ * {@link SnapshotIdentity} behind one volatile reference, replaced whole on every stamp. A scraper
+ * that reads it once renders a pair some snapshot really had; two plain fields could pair an old
+ * position with a new hash and read as a false divergence for one scrape. The holder is allocated
+ * once per snapshot taken or restored, never on the per-command path.</p>
  */
 public final class CoreNodeMetrics {
 
@@ -46,6 +52,23 @@ public final class CoreNodeMetrics {
     /** money-schema templateIds are small (1..33 today); anything larger shares the last slot. */
     public static final int TEMPLATE_SLOTS = 64;
     static final int PUBLISH_EVERY = 64;
+
+    /** {@link SnapshotIdentity#stateHash()} when no hash is known: before any snapshot, or a stub. */
+    public static final long UNKNOWN_HASH = -1L;
+
+    /**
+     * The log position of the last snapshot this node took or restored from, and the CRC32C of that
+     * snapshot's payload as an unsigned 32-bit value ({@link #UNKNOWN_HASH} when none is known). The
+     * hash is a function of the replicated state at that position only, so every healthy member
+     * reports the same pair. Telemetry: it decides nothing.
+     */
+    public record SnapshotIdentity(long logPosition, long stateHash) {
+        static final SnapshotIdentity NONE = new SnapshotIdentity(-1L, UNKNOWN_HASH);
+
+        public boolean hasHash() {
+            return stateHash >= 0;
+        }
+    }
 
     /** One single-writer latency distribution: cumulative-free buckets, sum, count, exact max. */
     public static final class Histogram {
@@ -103,7 +126,8 @@ public final class CoreNodeMetrics {
     private long lastSnapshotSerializeNanos = -1;
     private long lastSnapshotOfferNanos = -1;
     private long lastSnapshotRecordNanos = -1;
-    private long lastSnapshotLogPosition = -1;
+    // Written on the service thread, read by the scraper without acquire(): the pair is one reference.
+    private volatile SnapshotIdentity snapshotIdentity = SnapshotIdentity.NONE;
 
     // Rare writes (role change / startup): volatile is fine here.
     private volatile int role = -1;
@@ -168,15 +192,29 @@ public final class CoreNodeMetrics {
         publish();
     }
 
+    /**
+     * A snapshot this node took. {@code stateHash} is the payload CRC32C of a full image, or
+     * {@link #UNKNOWN_HASH} for a stub (it carries no state).
+     */
     public void stampSnapshot(final long epochMs, final long bytes, final long chunks, final long serializeNanos,
-                              final long offerNanos, final long recordNanos, final long logPosition) {
+                              final long offerNanos, final long recordNanos, final long logPosition,
+                              final long stateHash) {
         lastSnapshotMs = epochMs;
         lastSnapshotBytes = bytes;
         lastSnapshotChunks = chunks;
         lastSnapshotSerializeNanos = serializeNanos;
         lastSnapshotOfferNanos = offerNanos;
         lastSnapshotRecordNanos = recordNanos;
-        lastSnapshotLogPosition = logPosition;
+        snapshotIdentity = new SnapshotIdentity(logPosition, stateHash < 0 ? UNKNOWN_HASH : stateHash);
+        publish();
+    }
+
+    /**
+     * The full image this node restored from at start: its log position and payload CRC32C. Only the
+     * identity moves; the age, size and timings stay those of a snapshot this node took (-1 = never).
+     */
+    public void stampRestoredSnapshot(final long logPosition, final long stateHash) {
+        snapshotIdentity = new SnapshotIdentity(logPosition, stateHash < 0 ? UNKNOWN_HASH : stateHash);
         publish();
     }
 
@@ -256,8 +294,13 @@ public final class CoreNodeMetrics {
         return lastSnapshotRecordNanos;
     }
 
+    /** The last snapshot's position and hash as one pair; read it once per render. */
+    public SnapshotIdentity snapshotIdentity() {
+        return snapshotIdentity;
+    }
+
     public long lastSnapshotLogPosition() {
-        return lastSnapshotLogPosition;
+        return snapshotIdentity.logPosition();
     }
 
     public int role() {

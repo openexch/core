@@ -185,6 +185,11 @@ final class ShadowRestore {
         long producerSerializeDelayMs;
         /** Builds the member's shadow writer instead of the production constructor (a slow or crashing writer). */
         MemberShadowHousekeeping.WriterFactory writerFactory;
+        /**
+         * Snapshot telemetry control: the reported state hash mixes in the member id (a node-local input), so the
+         * replica comparison of {@code core_snapshot_state_hash} must fail.
+         */
+        boolean stateHashMixesMemberId;
 
         static Faults afterTailFrames(final long n, final Runnable hook) {
             if (n < 0) {

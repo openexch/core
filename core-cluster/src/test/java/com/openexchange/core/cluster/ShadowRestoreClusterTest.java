@@ -149,6 +149,14 @@ public class ShadowRestoreClusterTest {
             final long pCm = rig.snapshotAll();
             assertTrue("the snapshot is a stub on every member: " + rig.tee.all("kind="),
                     rig.tee.all("logPosition=" + pCm + " kind=stub").size() >= 3);
+            for (final Member m : rig.live()) {
+                // a stub carries no state: its position is stamped, its hash series is omitted
+                final String body = ServiceProbe.nodeMetricsText(m.service);
+                assertEquals("member " + m.id + " stub position", Long.toString(pCm),
+                        ServiceProbe.seriesValue(body, "core_snapshot_last_log_position"));
+                assertEquals("member " + m.id + " reports no state hash for a stub", null,
+                        ServiceProbe.seriesValue(body, "core_snapshot_state_hash"));
+            }
             tool.deposits(80);
             rig.awaitImagesEqual(f, leader, 60_000);
             final RecordedLog log = rig.captureCommitted(f);
@@ -174,6 +182,8 @@ public class ShadowRestoreClusterTest {
             produce(rig, f, log, pCm, "EQUAL(P_s==P_cm), 10 s late (C2)");
             final long equalMs = production(rig, leader, f, tool, "R4", "EQUAL P_s=" + pCm, budget);
             assertEquals("core_restore_path EQUAL", 2, ServiceProbe.rcs(f.service, "core_restore_path"));
+            assertEquals("a restore from a stub reports no state hash", null, ServiceProbe.seriesValue(
+                    ServiceProbe.nodeMetricsText(f.service), "core_snapshot_state_hash"));
             System.out.println("GREEN 11.2 readyMs TAIL=" + tailMs + " SKIP=" + skipMs + " SKIP2=" + skip2Ms + " EQUAL="
                     + equalMs + " budget=" + budget);
         }
