@@ -129,7 +129,8 @@ public class CoreNodeMetricsTest {
         assertTrue(out, out.contains("core_snapshot_last_bytes -1\n"));
         assertTrue(out, out.contains("core_snapshot_last_record_seconds -1\n"));
 
-        m.stampSnapshot(System.currentTimeMillis(), 178_537L, 22L, 8_000_000L, 1_000_000L, 17_000_000L, 261_856L);
+        m.stampSnapshot(System.currentTimeMillis(), 178_537L, 22L, 8_000_000L, 1_000_000L, 17_000_000L, 261_856L,
+                3_613_310_092L);
         out = body.render();
         assertTrue(out, out.contains("core_snapshot_age_seconds 0\n"));
         assertTrue(out, out.contains("core_snapshot_last_bytes 178537\n"));
@@ -137,5 +138,93 @@ public class CoreNodeMetricsTest {
         assertTrue(out, out.contains("core_snapshot_last_log_position 261856\n"));
         assertTrue(out, out.contains("core_snapshot_last_serialize_seconds 0.008\n"));
         assertTrue(out, out.contains("core_snapshot_last_record_seconds 0.017\n"));
+        assertTrue(out, out.contains("# TYPE core_snapshot_state_hash gauge\ncore_snapshot_state_hash 3613310092\n"));
+    }
+
+    @Test
+    public void theHashSeriesIsOmittedUntilAHashIsKnownAndAStubSnapshotStampsNone() {
+        final CoreNodeMetrics m = new CoreNodeMetrics(0);
+        final CoreMetricsBody body = new CoreMetricsBody(m);
+        String out = body.render();
+        assertFalse(out, out.contains("core_snapshot_state_hash"));
+        assertTrue(out, out.contains("core_snapshot_last_log_position -1\n"));
+
+        m.stampSnapshot(System.currentTimeMillis(), 120L, 1L, 1L, 1L, 0L, 4_096L, 77L);
+        out = body.render();
+        assertTrue(out, out.contains("core_snapshot_state_hash 77\n"));
+
+        // a stub names where the state lives; it carries no state to hash, so the series goes away
+        m.stampSnapshot(System.currentTimeMillis(), 90L, 1L, 1L, 1L, 0L, 8_192L, CoreNodeMetrics.UNKNOWN_HASH);
+        out = body.render();
+        assertTrue(out, out.contains("core_snapshot_last_log_position 8192\n"));
+        assertFalse(out, out.contains("core_snapshot_state_hash"));
+    }
+
+    @Test
+    public void aRestoreStampsThePairButNotTheAgeOrSize() {
+        final CoreNodeMetrics m = new CoreNodeMetrics(0);
+        m.stampRestoredSnapshot(14_848L, 0xFFFF_FFFFL);
+        final String out = new CoreMetricsBody(m).render();
+        assertTrue(out, out.contains("core_snapshot_last_log_position 14848\n"));
+        assertTrue(out, out.contains("core_snapshot_state_hash 4294967295\n"));
+        assertTrue("this node took no snapshot: " + out, out.contains("core_snapshot_age_seconds -1\n"));
+        assertTrue(out, out.contains("core_snapshot_last_bytes -1\n"));
+    }
+
+    @Test
+    public void theHelpTextPromisesOnlyWhatAStubRestoreDelivers() {
+        final String out = new CoreMetricsBody(new CoreNodeMetrics(0)).render();
+        // a stub restore stamps nothing, so the position names a snapshot taken or a FULL image restored
+        assertTrue(out, out.contains("# HELP core_snapshot_last_log_position Cluster log position of the last snapshot "
+                + "this node took, or restored a full image from (-1 = never)\n"));
+        final CoreNodeMetrics m = new CoreNodeMetrics(0);
+        m.stampRestoredSnapshot(1L, 2L);
+        final String hashed = new CoreMetricsBody(m).render();
+        // the hash covers the codec layout too: two builds with different layouts differ at equal state
+        assertTrue(hashed, hashed.contains("# HELP core_snapshot_state_hash CRC32C of the payload of the snapshot at "
+                + "core_snapshot_last_log_position, unsigned decimal; equal on every healthy member running the same "
+                + "snapshot layout\n"));
+    }
+
+    @Test
+    public void aStampedIdentityIsImmutableAndReplacedAsOneReference() {
+        final CoreNodeMetrics m = new CoreNodeMetrics(0);
+        assertEquals(-1L, m.snapshotIdentity().logPosition());
+        assertFalse(m.snapshotIdentity().hasHash());
+        m.stampRestoredSnapshot(100L, 5L);
+        final CoreNodeMetrics.SnapshotIdentity first = m.snapshotIdentity();
+        m.stampSnapshot(1L, 1L, 1L, 1L, 1L, 1L, 200L, 6L);
+        assertEquals("a holder already read never changes", 100L, first.logPosition());
+        assertEquals(5L, first.stateHash());
+        assertEquals(200L, m.snapshotIdentity().logPosition());
+        assertEquals(6L, m.snapshotIdentity().stateHash());
+        assertEquals(200L, m.lastSnapshotLogPosition());
+    }
+
+    @Test
+    public void aScraperNeverSeesAPositionPairedWithAnotherSnapshotsHash() throws Exception {
+        final CoreNodeMetrics m = new CoreNodeMetrics(0);
+        final int stamps = 200_000;
+        final java.util.concurrent.atomic.AtomicReference<String> torn = new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+        final Thread scraper = new Thread(() -> {
+            while (!done.get() && torn.get() == null) {
+                final CoreNodeMetrics.SnapshotIdentity id = m.snapshotIdentity();
+                if (id.logPosition() >= 0 && id.stateHash() != (id.logPosition() * 31) % 0xFFFF_FFFFL) {
+                    torn.set(id.toString());
+                }
+            }
+        });
+        scraper.start();
+        for (long p = 1; p <= stamps; p++) {
+            if ((p & 1) == 0) {
+                m.stampSnapshot(1L, 1L, 1L, 1L, 1L, 1L, p, (p * 31) % 0xFFFF_FFFFL);
+            } else {
+                m.stampRestoredSnapshot(p, (p * 31) % 0xFFFF_FFFFL);
+            }
+        }
+        done.set(true);
+        scraper.join(10_000);
+        assertEquals("torn pair seen by the scraper", null, torn.get());
     }
 }

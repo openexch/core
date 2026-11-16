@@ -46,6 +46,25 @@ public final class ServiceProbe {
                 .lastLogPosition();
     }
 
+    /**
+     * The service's own series of {@code /metrics} ({@code core_snapshot_*}, role, positions, histograms) as the node
+     * endpoint renders them from its {@code nodeMetrics}; the engine gauges the service registers are left out.
+     */
+    public static String nodeMetricsText(final CoreClusteredService service) {
+        return new com.openexchange.core.infrastructure.metrics.CoreMetricsBody(
+                (com.openexchange.core.infrastructure.metrics.CoreNodeMetrics)field(service, "nodeMetrics")).render();
+    }
+
+    /** The value text of the unlabelled series {@code name} in a Prometheus body; null when the series is absent. */
+    public static String seriesValue(final String body, final String name) {
+        for (final String line : body.split("\n")) {
+            if (line.startsWith(name + " ")) {
+                return line.substring(name.length() + 1).trim();
+            }
+        }
+        return null;
+    }
+
     /** {@code /ready} as the node endpoint computes it. */
     public static boolean ready(final CoreClusteredService service) {
         return ((NodeReadiness)field(service, "readiness")).ready();

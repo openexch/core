@@ -917,7 +917,9 @@ public final class CoreClusteredService implements ClusteredService {
             } else {
                 port = 9700 + nodeId;
             }
-            nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(readiness, metricsBody()::render);
+            // /health and /ready end with version= and build= from this engine jar's manifest (telemetry only)
+            nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(readiness, metricsBody()::render)
+                    .withBuild(com.openexchange.cluster.BuildInfo.of(CoreClusteredService.class));
             nodeEndpoint.start(port);
         } catch (Exception e) {
             // A probe endpoint must never be the reason the ledger does not start.
@@ -1352,6 +1354,9 @@ public final class CoreClusteredService implements ClusteredService {
             length = applier.serialize(buffer);
         }
         final long serializedNs = System.nanoTime();
+        // The CRC32C the envelope already carries over the payload; a stub carries no state, so no hash
+        final long stateHash = stub ? com.openexchange.core.infrastructure.metrics.CoreNodeMetrics.UNKNOWN_HASH
+                : snapshotStateHash(buffer, length);
 
         // Chunked, like the matching engine's fix: a single offer() throws
         // IllegalArgumentException the moment the payload exceeds the publication's
@@ -1402,7 +1407,7 @@ public final class CoreClusteredService implements ClusteredService {
                 + " logPosition=" + cluster.logPosition() + " kind=" + (stub ? "stub" : "full")
                 + (inWindow ? " inSkipWindow=true" : "") + " shadow=" + shadow + " shadowSerializeMs=" + shadowMs);
         nodeMetrics.stampSnapshot(System.currentTimeMillis(), length, chunks, serializedNs - startNs,
-                offeredNs - serializedNs, recordedNs - offeredNs, cluster.logPosition());
+                offeredNs - serializedNs, recordedNs - offeredNs, cluster.logPosition(), stateHash);
 
         // The baseline for the next snapshot, on EVERY member and whoever asked for this one.
         snapshotCadence.snapshotTaken(cluster.logPosition(), System.nanoTime());
@@ -1677,6 +1682,9 @@ public final class CoreClusteredService implements ClusteredService {
             }
             // Until the first replayed frame the engine's position is the image's, P_cm
             applier.stampLogPosition(cluster == null ? 0L : cluster.logPosition());
+            // The identity of the image this node now runs on: the bytes some member wrote at this position
+            nodeMetrics.stampRestoredSnapshot(cluster == null ? -1L : cluster.logPosition(),
+                    snapshotStateHash(image, imageLength));
             snapshotModeCounters.set(SnapshotModeCounters.C.RESTORE_PATH, SnapshotModeCounters.PATH_FULL);
             final BalanceSnapshotCodec.Decoded decoded = applier.lastRestored();
             System.out.println("[SNAPSHOT] restored orders=" + engine.orders().orders().size() + " accounts=" + decoded.accountCount
@@ -1698,6 +1706,25 @@ public final class CoreClusteredService implements ClusteredService {
             failFast.run();
             throw refused;
         }
+    }
+
+    /**
+     * The state hash of a sealed full image: the payload CRC32C from the kit envelope trailer, unsigned. No traversal,
+     * no allocation. Telemetry only: an image without a readable envelope reports no hash instead of failing the
+     * callback (the restore and the take verify or write the envelope themselves).
+     */
+    private long snapshotStateHash(final DirectBuffer image, final int imageLength) {
+        final long crc;
+        try {
+            crc = com.openexchange.cluster.SnapshotEnvelope.sealedCrc(image, imageLength);
+        } catch (final IllegalArgumentException noEnvelope) {
+            System.err.println("[SNAPSHOT] no state hash: " + noEnvelope.getMessage());
+            return com.openexchange.core.infrastructure.metrics.CoreNodeMetrics.UNKNOWN_HASH;
+        }
+        if (shadowFaults.stateHashMixesMemberId && cluster != null) {
+            return (crc ^ (0x9E37_79B9L * (cluster.memberId() + 1))) & 0xFFFF_FFFFL; // negative control only
+        }
+        return crc;
     }
 
     /**
