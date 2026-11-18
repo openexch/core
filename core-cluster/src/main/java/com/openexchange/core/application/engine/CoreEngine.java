@@ -896,6 +896,15 @@ public final class CoreEngine {
         return coreConfig;
     }
 
+    /**
+     * The genesis id of the recorded CoreConfig, 0 while none is recorded. Replicated state (it comes from the log and
+     * from the snapshot), so every member answers the same value; the query replies carry it.
+     */
+    public long recordedGenesisId() {
+        final com.openexchange.core.domain.commands.CoreConfigCommand recorded = coreConfig.recorded();
+        return recorded == null ? 0L : recorded.genesisId;
+    }
+
     public void setConfigFailFast(Runnable failFast) {
         this.configFailFast = failFast;
     }
@@ -1008,6 +1017,7 @@ public final class CoreEngine {
         @Override public long requestTtlMs() { return limits.requestTtlMs(); }
         @Override public int requestPerUserCap() { return limits.requestPerUserCap(); }
         @Override public int orderEventRingCapacity() { return limits.orderEventRingCapacity(); }
+        @Override public long genesisId() { return recordedGenesisId(); }
         @Override public int gateStateCode() { return gate.state(OrderEntryGate.GLOBAL).code(); }
         @Override public int gateReasons() { return gate.reasons(OrderEntryGate.GLOBAL); }
         @Override public int marketCount() { return coreConfig.recorded() == null ? 0 : coreConfig.recorded().markets.length; }

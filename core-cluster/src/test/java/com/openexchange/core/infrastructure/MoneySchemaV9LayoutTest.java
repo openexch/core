@@ -45,19 +45,20 @@ import static org.junit.Assert.assertTrue;
 
 /**
  * Every block length, offset and enum value the money schema freezes, checked against the generated codecs. Version 8
- * adds templates and one enum value and moves nothing: the v7 additions still sit after the unchanged v6 prefix of each
- * template, the v8 templates are new ids, the domain enums carry the wire codes, and a frame of any other version is
- * refused by the exact v8 gate (schema reject, counted).
+ * added templates and one enum value and moved nothing: the v7 additions still sit after the unchanged v6 prefix of each
+ * template, the v8 templates are new ids, the domain enums carry the wire codes. Version 9 appends one field, genesisId,
+ * to the replies 116 and 118 after their v8 root block and moves nothing else. A frame of any other version is refused by
+ * the exact v9 gate (schema reject, counted).
  */
-public class MoneySchemaV8LayoutTest {
+public class MoneySchemaV9LayoutTest {
 
     private static final int HEADER = MessageHeaderEncoder.ENCODED_LENGTH;
 
     @Test
     public void schemaIdentity() {
         assertEquals(2, MessageHeaderDecoder.SCHEMA_ID);
-        assertEquals(8, MessageHeaderDecoder.SCHEMA_VERSION);
-        assertEquals("0.8", MessageHeaderDecoder.SEMANTIC_VERSION);
+        assertEquals(9, MessageHeaderDecoder.SCHEMA_VERSION);
+        assertEquals("0.9", MessageHeaderDecoder.SEMANTIC_VERSION);
     }
 
     /** Version 8: the gateway queries 54 to 56, the limits record 77 and the replies 115 to 118. */
@@ -67,15 +68,15 @@ public class MoneySchemaV8LayoutTest {
         // {decoder, templateId, root block length}
         final Object[][] roots = {
             {"RequestOrderEventsDecoder", 54, 20}, {"RequestUserBalancesDecoder", 55, 16}, {"RequestCoreConfigDecoder", 56, 8},
-            {"CoreLimitsSetDecoder", 77, 28}, {"OrderEventsPageDecoder", 115, 8}, {"OrderEventsEndDecoder", 116, 36},
-            {"UserBalancesDecoder", 117, 25}, {"CoreConfigReportDecoder", 118, 49},
+            {"CoreLimitsSetDecoder", 77, 28}, {"OrderEventsPageDecoder", 115, 8}, {"OrderEventsEndDecoder", 116, 44},
+            {"UserBalancesDecoder", 117, 25}, {"CoreConfigReportDecoder", 118, 57},
         };
         for (final Object[] row : roots) {
             try {
                 final Class<?> c = Class.forName(g + row[0]);
                 assertEquals(row[0] + " templateId", row[1], c.getField("TEMPLATE_ID").get(null));
                 assertEquals(row[0] + " block length", row[2], c.getField("BLOCK_LENGTH").get(null));
-                assertEquals(row[0] + " is a v8 template", 8, c.getField("SCHEMA_VERSION").get(null));
+                assertEquals(row[0] + " is generated from the v9 schema", 9, c.getField("SCHEMA_VERSION").get(null));
                 // the ingress templates are in the demuxer's table; the replies are egress and are not
                 assertEquals(row[0] + " in the ingress table", (Integer) row[1] < 100 ? row[2] : (Object) (-1),
                         CoreSbeDemuxerAccess.minimumBlockLength((Integer) row[1]));
@@ -120,6 +121,9 @@ public class MoneySchemaV8LayoutTest {
         assertEquals(12, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.firstAvailableSeqEncodingOffset());
         assertEquals(20, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.lastSeqEncodingOffset());
         assertEquals(28, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.nextFromSeqEncodingOffset());
+        // v9: genesisId appended after the v8 block of 36
+        assertEquals(36, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.genesisIdEncodingOffset());
+        assertEquals(9, com.openexchange.core.infrastructure.generated.OrderEventsEndDecoder.genesisIdSinceVersion());
         // 117
         assertEquals(16, com.openexchange.core.infrastructure.generated.UserBalancesDecoder.knownEncodingOffset());
         assertEquals(17, com.openexchange.core.infrastructure.generated.UserBalancesDecoder.asOfLogPositionEncodingOffset());
@@ -134,6 +138,9 @@ public class MoneySchemaV8LayoutTest {
         assertEquals(36, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.gateStateEncodingOffset());
         assertEquals(37, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.gateReasonsEncodingOffset());
         assertEquals(41, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.asOfLogPositionEncodingOffset());
+        // v9: genesisId appended to the root block after asOfLogPosition (v8 block 49), before the groups
+        assertEquals(49, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.genesisIdEncodingOffset());
+        assertEquals(9, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.genesisIdSinceVersion());
         assertEquals(102, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.sbeBlockLength());
         assertEquals(60, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.minQuantityEncodingOffset());
         assertEquals(92, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.riskConfigVersionEncodingOffset());
@@ -141,7 +148,7 @@ public class MoneySchemaV8LayoutTest {
         assertEquals(97, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.gateReasonsEncodingOffset());
         assertEquals(101, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.MarketsDecoder.circuitBreakerEncodingOffset());
         assertEquals(13, com.openexchange.core.infrastructure.generated.CoreConfigReportDecoder.AssetsDecoder.sbeBlockLength());
-        assertEquals("118 with five markets and four assets is one small frame", true, HEADER + 49 + 4 + 5 * 102 + 4 + 4 * 13 < 1408);
+        assertEquals("118 with five markets and four assets is one small frame", true, HEADER + 57 + 4 + 5 * 102 + 4 + 4 * 13 < 1408);
         // the new ConfigKind value, wire and domain
         assertEquals(4, com.openexchange.core.infrastructure.generated.ConfigKind.LIMITS.value());
         assertEquals(4, com.openexchange.core.domain.ConfigKind.LIMITS.code());
@@ -327,7 +334,7 @@ public class MoneySchemaV8LayoutTest {
         assertTrue(GateReasonsDecoder.meBehavior(1 << 8));
     }
 
-    /** A v6 or v7 producer's frames are dropped by the exact v8 gate, counted, never decoded. */
+    /** A v6, v7 or v8 producer's frames are dropped by the exact v9 gate, counted, never decoded. */
     @Test
     public void v6ShapedFramesAreSchemaRejects() {
         final CoreEngine engine = new CoreEngine();
@@ -347,16 +354,19 @@ public class MoneySchemaV8LayoutTest {
                 .correlationId(1).userId(1).assetId(0).amount(1).requestIdHigh(0).requestIdLow(0).encodedLength();
         buf.putShort(6, (short) 6, ByteOrder.LITTLE_ENDIAN);
         demuxer.dispatchTrusted(buf, 0, len, 1L);
-        // the same well-formed deposit under a v7 header, and under a version this build has not heard of
+        // the same well-formed deposit under a v7 header, a v8 header, and a version this build has not heard of
         buf.putShort(6, (short) 7, ByteOrder.LITTLE_ENDIAN);
         demuxer.dispatchTrusted(buf, 0, len, 1L);
-        buf.putShort(6, (short) 9, ByteOrder.LITTLE_ENDIAN);
-        demuxer.dispatchTrusted(buf, 0, len, 1L);
-        assertEquals(7, demuxer.schemaRejectCount());
-        // and under its own version it is applied
         buf.putShort(6, (short) 8, ByteOrder.LITTLE_ENDIAN);
         demuxer.dispatchTrusted(buf, 0, len, 1L);
-        assertEquals(7, demuxer.schemaRejectCount());
+        buf.putShort(6, (short) 10, ByteOrder.LITTLE_ENDIAN);
+        demuxer.dispatchTrusted(buf, 0, len, 1L);
+        assertEquals(8, demuxer.schemaRejectCount());
+        assertEquals("nothing of a refused frame was applied", 0, engine.accountCount());
+        // and under its own version it is applied
+        buf.putShort(6, (short) 9, ByteOrder.LITTLE_ENDIAN);
+        demuxer.dispatchTrusted(buf, 0, len, 1L);
+        assertEquals(8, demuxer.schemaRejectCount());
         assertEquals(1, engine.accountCount());
         engine.account(1).available(0);
         assertEquals(0, demuxer.decodeRejectCount());

@@ -20,6 +20,9 @@ public interface CoreConfigReportView {
 
     int orderEventRingCapacity();
 
+    /** The recorded CoreConfig's genesis id, 0 while no CoreConfig is recorded. */
+    long genesisId();
+
     /** The global gate: wire state code and reason bitmask. */
     int gateStateCode();
 

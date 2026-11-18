@@ -293,7 +293,9 @@ public final class RecordingCoreSink implements CoreEventSink {
     }
 
     @Override
-    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) {
+    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq,
+                                 long genesisId) {
+        // genesisId is not recorded: a reply is not state, and the determinism corpus rendering stays as it was
         events.add(new CoreEngineEvent.OrderEventsEnd(correlationId, count, firstAvailableSeq, lastSeq, nextFromSeq));
     }
 

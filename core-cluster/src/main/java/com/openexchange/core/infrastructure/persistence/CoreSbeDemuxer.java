@@ -90,8 +90,8 @@ public final class CoreSbeDemuxer {
 
     /**
      * The wire identity every ingress frame must carry. The version gate is EXACT: the core
-     * speaks v8 only (single-manifest clean-genesis cut); a v7 producer is dropped and counted rather
-     * than half-understood, and no v8 frame reaches a v7 core.
+     * speaks v9 only (single-manifest clean-genesis cut); a v8 producer is dropped and counted rather
+     * than half-understood, and no v9 frame reaches a v8 core.
      * A later additive bump turns this into a range again, with the ME's rule: the floor advances only when
      * pre-floor producers and pre-floor frames in any replayable log are provably gone.
      */

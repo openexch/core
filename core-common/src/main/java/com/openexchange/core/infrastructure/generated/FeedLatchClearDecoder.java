@@ -13,8 +13,8 @@ public final class FeedLatchClearDecoder
     public static final int BLOCK_LENGTH = 17;
     public static final int TEMPLATE_ID = 76;
     public static final int SCHEMA_ID = 2;
-    public static final int SCHEMA_VERSION = 8;
-    public static final String SEMANTIC_VERSION = "0.8";
+    public static final int SCHEMA_VERSION = 9;
+    public static final String SEMANTIC_VERSION = "0.9";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final FeedLatchClearDecoder parentMessage = this;

@@ -558,7 +558,7 @@ public class WireRoundTripTest {
                 .expectedJournalSeq(3).seenJournalSeq(4).bridgeIdentity(5);
         final var fh = new com.openexchange.core.infrastructure.generated.FeedHaltDecoder().wrapAndApplyHeader(b, 0, hd);
         assertEquals(66, hd.templateId());
-        assertEquals(8, hd.version());
+        assertEquals(9, hd.version());
         assertEquals(List.of(1L, 2L, 3L, 4L, 5L), List.of(fh.correlationId(), fh.meEpochSeen(), fh.expectedJournalSeq(),
                 fh.seenJournalSeq(), fh.bridgeIdentity()));
         assertEquals(com.openexchange.core.infrastructure.generated.FeedHaltReason.SETTLE_REFUSED, fh.reason());

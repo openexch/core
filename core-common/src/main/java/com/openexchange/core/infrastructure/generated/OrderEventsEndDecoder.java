@@ -10,11 +10,11 @@ import org.agrona.DirectBuffer;
 @SuppressWarnings("all")
 public final class OrderEventsEndDecoder
 {
-    public static final int BLOCK_LENGTH = 36;
+    public static final int BLOCK_LENGTH = 44;
     public static final int TEMPLATE_ID = 116;
     public static final int SCHEMA_ID = 2;
-    public static final int SCHEMA_VERSION = 8;
-    public static final String SEMANTIC_VERSION = "0.8";
+    public static final int SCHEMA_VERSION = 9;
+    public static final String SEMANTIC_VERSION = "0.9";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final OrderEventsEndDecoder parentMessage = this;
@@ -387,6 +387,62 @@ public final class OrderEventsEndDecoder
     }
 
 
+    public static int genesisIdId()
+    {
+        return 6;
+    }
+
+    public static int genesisIdSinceVersion()
+    {
+        return 9;
+    }
+
+    public static int genesisIdEncodingOffset()
+    {
+        return 36;
+    }
+
+    public static int genesisIdEncodingLength()
+    {
+        return 8;
+    }
+
+    public static String genesisIdMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static long genesisIdNullValue()
+    {
+        return -9223372036854775808L;
+    }
+
+    public static long genesisIdMinValue()
+    {
+        return -9223372036854775807L;
+    }
+
+    public static long genesisIdMaxValue()
+    {
+        return 9223372036854775807L;
+    }
+
+    public long genesisId()
+    {
+        if (parentMessage.actingVersion < 9)
+        {
+            return -9223372036854775808L;
+        }
+
+        return buffer.getLong(offset + 36, BYTE_ORDER);
+    }
+
+
     public String toString()
     {
         if (null == buffer)
@@ -442,6 +498,9 @@ public final class OrderEventsEndDecoder
         builder.append('|');
         builder.append("nextFromSeq=");
         builder.append(this.nextFromSeq());
+        builder.append('|');
+        builder.append("genesisId=");
+        builder.append(this.genesisId());
 
         limit(originalLimit);
 

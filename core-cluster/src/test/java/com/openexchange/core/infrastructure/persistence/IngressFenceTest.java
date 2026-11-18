@@ -190,17 +190,17 @@ public class IngressFenceTest {
 
     @Test
     public void versionOutsideTheExactOneIsDropped() {
-        // The core speaks exactly v8; a v7 producer is not half-understood, it is dropped and counted, and so is a
-        // v9 one.
+        // The core speaks exactly v9; a v7 or v8 producer is not half-understood, it is dropped and counted, and so is
+        // a v10 one.
         final Rig r = new Rig();
-        for (final int version : new int[] {0, 7, 9}) {
+        for (final int version : new int[] {0, 7, 8, 10}) {
             final int len = r.deposit(1, 0, 100);
             r.buf.putShort(6, (short) version, ByteOrder.LITTLE_ENDIAN);
             r.dispatch(len);
         }
-        assertEquals(3, r.demuxer.schemaRejectCount());
+        assertEquals(4, r.demuxer.schemaRejectCount());
         assertEquals(0, r.engine.accountCount());
-        r.dispatch(r.deposit(1, 0, 100)); // version 8 applies
+        r.dispatch(r.deposit(1, 0, 100)); // version 9 applies
         assertEquals(1, r.engine.accountCount());
     }
 

@@ -10,11 +10,11 @@ import org.agrona.DirectBuffer;
 @SuppressWarnings("all")
 public final class CoreConfigReportDecoder
 {
-    public static final int BLOCK_LENGTH = 49;
+    public static final int BLOCK_LENGTH = 57;
     public static final int TEMPLATE_ID = 118;
     public static final int SCHEMA_ID = 2;
-    public static final int SCHEMA_VERSION = 8;
-    public static final String SEMANTIC_VERSION = "0.8";
+    public static final int SCHEMA_VERSION = 9;
+    public static final String SEMANTIC_VERSION = "0.9";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final CoreConfigReportDecoder parentMessage = this;
@@ -616,6 +616,62 @@ public final class CoreConfigReportDecoder
     public long asOfLogPosition()
     {
         return buffer.getLong(offset + 41, BYTE_ORDER);
+    }
+
+
+    public static int genesisIdId()
+    {
+        return 11;
+    }
+
+    public static int genesisIdSinceVersion()
+    {
+        return 9;
+    }
+
+    public static int genesisIdEncodingOffset()
+    {
+        return 49;
+    }
+
+    public static int genesisIdEncodingLength()
+    {
+        return 8;
+    }
+
+    public static String genesisIdMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static long genesisIdNullValue()
+    {
+        return -9223372036854775808L;
+    }
+
+    public static long genesisIdMinValue()
+    {
+        return -9223372036854775807L;
+    }
+
+    public static long genesisIdMaxValue()
+    {
+        return 9223372036854775807L;
+    }
+
+    public long genesisId()
+    {
+        if (parentMessage.actingVersion < 9)
+        {
+            return -9223372036854775808L;
+        }
+
+        return buffer.getLong(offset + 49, BYTE_ORDER);
     }
 
 
@@ -2100,6 +2156,9 @@ public final class CoreConfigReportDecoder
         builder.append('|');
         builder.append("asOfLogPosition=");
         builder.append(this.asOfLogPosition());
+        builder.append('|');
+        builder.append("genesisId=");
+        builder.append(this.genesisId());
         builder.append('|');
         builder.append("markets=[");
         final int marketsOriginalOffset = markets.offset;
