@@ -24,7 +24,7 @@ v1 has no user-facing gateway yet.
 
 | module | what it is | jar |
 |---|---|---|
-| `core-common` | shared kernel: money value objects and the SBE wire codecs, generated at build time from `src/main/resources/sbe/money-schema.xml` (schema id 2, version 9; version 9 adds `genesisId` to OrderEventsEnd and CoreConfigReport, the recorded CoreConfig's genesis id, 0 before any CoreConfig is recorded) and `money-journal-schema.xml` (schema id 3, version 1) | library |
+| `core-common` | shared kernel: money value objects and the SBE wire codecs, generated at build time from `src/main/resources/sbe/money-schema.xml` (schema id 2, version 9; version 9 adds `genesisId` to OrderEventsEnd and CoreConfigReport, the recorded CoreConfig's genesis id, 0 before any CoreConfig is recorded) and `money-journal-schema.xml` (schema id 3, version 2: every record carries `logPosition`, the core log position of the entry that produced it) | library |
 | `core-cluster` | the engine: domain model, deterministic engine, Aeron cluster service. Entry point `com.openexchange.core.Main` | `core-cluster/target/core-cluster.jar` |
 | `core-bridge` | Java settlement bridge: tails the matching engine's settlement journal and forwards trades and terminal order statuses into the cluster. Entry point `com.openexchange.core.bridge.BridgeMain` | `core-bridge/target/core-bridge.jar` |
 | `core-projector` | follows the money journal (an Aeron Archive recording) and projects every money movement into PostgreSQL, resumable from the PostgreSQL high-water mark. Entry point `com.openexchange.core.projector.ProjectorMain` | `core-projector/target/core-projector.jar` |
@@ -114,6 +114,14 @@ Every member records one 216-byte record per order event (schema id 5, `core-com
 | `CORE_ARCHIVE_REPLAY_PROBE_STREAM` | `0` | the replay stream whose open replays `core_archive_replays_active` counts (0: the gauge reads -1) |
 
 Restore: a SKIP whose image event sequence the local journal does not hold is abandoned for a path that replays the log; when none exists the SKIP is taken and the hole is declared, because the money state is correct. Holes are declared as `(D,S]` on `/health` and in `core_order_journal_holes_total`; an unreadable tail shows `unknown(,S]` and counts in `core_order_journal_tail_unreadable_total`. Hole ranges are kept in memory only, so after another restart at the same snapshot `/health` can read `holes=none` while the gap remains in the archive: a reader finds it by density. When a leader's archive stalls the leader stays leader and order entry stops.
+
+### Money projector
+
+The money journal is schema 3 version 2: every record carries `logPosition`, the core log position of the entry that produced it, the same on every member. The projector reads version 2 only (it parks with reason VERSION otherwise), and `money_journal.log_position` is NOT NULL. `log_position` is not unique (an epoch row and the movement it engages share one): consumers order by `(log_position, journal_seq)`.
+
+A record at or below the PostgreSQL high-water is never inserted. It is compared field by field (legs and log position included) with its stored rows, and a difference or a missing row parks the projector with PAYLOAD_CONFLICT. A dense gap on one source commits everything below it, and the next epoch reads the next configured source; only a gap that every source shows at the same high-water parks the projector (GAP). While no source has filled a gap, `projector_gap_pending` is 1 and `projector_gap_high_water` is the committed high-water below it; if no other source delivers anything within `PROJECTOR_GAP_UNFILLED_PARK_MS` (default 60000) the projector parks with reason GAP. `PROJECTOR_HALT_ON_GAP=false` projects past a gap and leaves a hole below the high-water: a source that later delivers the skipped record parks it with PAYLOAD_CONFLICT, so use it only with a manual repair.
+
+The canonical dump (`PostgresMoneyJournalStore.CANONICAL_DUMP`) lists every column except `ingested_at`; two projections of one journal dump equal. Metrics: `projector_duplicate_records_total`, `projector_payload_conflicts_total`, `projector_source_switches_total`, `projector_version_refusals_total`, `projector_gap_pending`, `projector_gap_high_water`.
 
 ### Shadow pulls and the purge anchor
 

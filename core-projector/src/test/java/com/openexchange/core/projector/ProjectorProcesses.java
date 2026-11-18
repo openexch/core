@@ -3,22 +3,26 @@ package com.openexchange.core.projector;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Child processes for the projector's process-level tests (SIGTERM, driver modes): a throwaway local
- * Postgres with V001 applied, child JVMs on this build's classpath, and the bookkeeping that removes them. One per test;
- * {@link #close()} in {@code @After}.
+ * Child processes for the projector's process-level tests (SIGTERM, driver modes, restarts): a throwaway local
+ * Postgres with V001 applied, child JVMs on this build's classpath (the journal source stand-in, an external driver,
+ * the production projector), and the bookkeeping that removes them. One per test; {@link #close()} in {@code @After}.
  *
  * <p>Postgres needs the server binaries ({@code initdb}, {@code postgres}, {@code psql}): {@code PROJECTOR_PG_BIN}, or
  * the newest {@code /usr/lib/postgresql/<n>/bin}; {@link #pgBin()} is null when there are none (tests assume it).
@@ -133,6 +137,24 @@ final class ProjectorProcesses implements AutoCloseable {
         return port;
     }
 
+    /** A further database {@code name} on the running throwaway cluster, with V001 applied. */
+    void createDatabase(final String name) throws Exception {
+        final Path root = dir("projector-pg-db-");
+        run(root.resolve("createdb.log"), psql(pgPort, "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                "CREATE DATABASE " + name));
+        final Path migration = root.resolve("V001__money_journal.sql");
+        try (var in = ProjectorProcesses.class.getResourceAsStream("/db/migration/V001__money_journal.sql")) {
+            assertTrue("V001 on the classpath", in != null);
+            Files.copy(in, migration);
+        }
+        run(root.resolve("migrate.log"), psql(pgPort, name, "-v", "ON_ERROR_STOP=1", "-f", migration.toString()));
+    }
+
+    /** The JDBC URL of database {@code name} on the throwaway cluster (user core, trust auth). */
+    String jdbcUrl(final String name) {
+        return "jdbc:postgresql://127.0.0.1:" + pgPort + "/" + name;
+    }
+
     /** One scalar from the "core" database. */
     String query(final String sql) throws Exception {
         final Path out = Files.createTempFile("projector-psql-", ".out");
@@ -179,6 +201,220 @@ final class ProjectorProcesses implements AutoCloseable {
             }
         }
         return best;
+    }
+
+    // ---- the journal source stand-in, an external driver, the production projector ----------------------------------
+
+    record Projector(Process process, Path log) {
+        String out() throws IOException {
+            return Files.readString(log);
+        }
+
+        Path embeddedDir() {
+            return Path.of("/dev/shm/aeron-projector-" + process.pid());
+        }
+    }
+
+    record Driver(Process process, Path dir, Path log) {
+        String out() throws IOException {
+            return Files.readString(log);
+        }
+    }
+
+    /** A {@link JournalSourceMain} child; {@code last[0]} is the last journalSeq it recorded. */
+    record Source(Process process, Path log, int controlPort, Path archiveDir, int[] last) {
+        void publish(final int n) throws Exception {
+            command("publish " + n);
+            last[0] += n;
+            awaitLine(process, log, "[SOURCE] recorded " + last[0], 30_000);
+        }
+
+        /** The replay sessions the source's archive runs now (its replay session count counter). */
+        int replays() throws Exception {
+            final int before = count(Files.readString(log), "[SOURCE] replays ");
+            command("replays");
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (true) {
+                final String out = Files.readString(log);
+                if (count(out, "[SOURCE] replays ") > before) {
+                    final int at = out.lastIndexOf("[SOURCE] replays ") + "[SOURCE] replays ".length();
+                    return Integer.parseInt(out.substring(at, out.indexOf('\n', at)).trim());
+                }
+                assertTrue("no replay count from the source: " + out, System.nanoTime() < deadline && process.isAlive());
+                Thread.sleep(20);
+            }
+        }
+
+        private void command(final String line) throws IOException {
+            final OutputStream in = process.getOutputStream();
+            in.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            in.flush();
+        }
+
+        private static int count(final String text, final String token) {
+            int n = 0;
+            for (int i = text.indexOf(token); i >= 0; i = text.indexOf(token, i + 1)) {
+                n++;
+            }
+            return n;
+        }
+    }
+
+    /** A fresh source with its own archive, {@code initial} records recorded. */
+    Source startSource(final int initial) throws Exception {
+        final Path base = dir("projector-src-");
+        return startSource(base, base.resolve("archive"), ProjectorProcesses.freePort(), initial, false);
+    }
+
+    /**
+     * The source's member restarts: kill -9, then a new process on the same archive and control port re-records
+     * journalSeq 1..last (a new recording whose overlap is byte equal, as a core member's log replay re-journals) and
+     * {@code more} new records.
+     */
+    Source restartSource(final Source old, final int more) throws Exception {
+        old.process.destroyForcibly();
+        assertTrue("the source did not die", old.process.waitFor(10, TimeUnit.SECONDS));
+        // a killed archive leaves its mark file looking active for the driver timeout; its process is gone
+        Files.deleteIfExists(old.archiveDir.resolve("archive-mark.dat"));
+        return startSource(dir("projector-src-restart-"), old.archiveDir, old.controlPort, old.last[0] + more, true);
+    }
+
+    private Source startSource(final Path base, final Path archiveDir, final int port, final int initial,
+                               final boolean keepArchive) throws Exception {
+        final Path aeronDir = shmName("projector-src-");
+        final List<String> cmd = java(testClasspath(), base,
+                "-Daeron.term.buffer.sparse.file=true", "-Daeron.term.buffer.length=1m");
+        cmd.addAll(List.of(JournalSourceMain.class.getName(), aeronDir.toString(), archiveDir.toString(),
+                String.valueOf(port), String.valueOf(initial), keepArchive ? "keep" : "fresh"));
+        final Path log = base.resolve("source.log");
+        final Process p = start(new ProcessBuilder(cmd), log);
+        awaitLine(p, log, "[SOURCE] recorded " + initial, 60_000);
+        return new Source(p, log, port, archiveDir, new int[] {initial});
+    }
+
+    Driver startDriver(final Path base) throws Exception {
+        return startDriver(base, shmName("projector-aeronmd-"));
+    }
+
+    /** An external driver: the real C aeronmd when {@code -Dprojector.aeronmd} or PROJECTOR_AERONMD names one, else Java. */
+    Driver startDriver(final Path base, final Path dir) throws Exception {
+        final Path log = Files.createTempFile(base, "driver-", ".log");
+        final String aeronmd = aeronmd();
+        final ProcessBuilder pb;
+        if (aeronmd != null) {
+            pb = new ProcessBuilder(aeronmd);
+            final Map<String, String> env = pb.environment();
+            env.put("LD_LIBRARY_PATH", Path.of(aeronmd).getParent().toString());
+            env.put("AERON_DIR", dir.toString());
+            env.put("AERON_DIR_DELETE_ON_START", "1");
+            env.put("AERON_DIR_DELETE_ON_SHUTDOWN", "1");
+            env.put("AERON_TERM_BUFFER_SPARSE_FILE", "1");
+            env.put("AERON_TERM_BUFFER_LENGTH", String.valueOf(1024 * 1024));
+            env.put("AERON_THREADING_MODE", "SHARED");
+        } else {
+            final List<String> cmd = java(testClasspath(), base,
+                    "-Daeron.dir=" + dir, "-Daeron.dir.delete.on.start=true", "-Daeron.dir.delete.on.shutdown=true",
+                    "-Daeron.term.buffer.sparse.file=true", "-Daeron.term.buffer.length=1m",
+                    "-Daeron.threading.mode=SHARED");
+            cmd.add("io.aeron.driver.MediaDriver");
+            pb = new ProcessBuilder(cmd);
+        }
+        final Process p = start(pb, log);
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!Files.exists(dir.resolve("cnc.dat"))) {
+            assertTrue("driver did not start: " + Files.readString(log), System.nanoTime() < deadline && p.isAlive());
+            Thread.sleep(50);
+        }
+        System.out.println("external driver: " + (aeronmd != null ? aeronmd : "Java MediaDriver") + " at " + dir);
+        return new Driver(p, dir, log);
+    }
+
+    static String aeronmd() {
+        String v = System.getProperty("projector.aeronmd");
+        if (v == null || v.isEmpty()) {
+            v = System.getenv("PROJECTOR_AERONMD");
+        }
+        if (v == null || v.isEmpty()) {
+            return null;
+        }
+        assertTrue("not an executable aeronmd: " + v, Files.isExecutable(Path.of(v)));
+        return v;
+    }
+
+    /** The production projector on the "core" database, reading {@code source}. */
+    Projector projector(final Path base, final Source source, final Map<String, String> extraEnv) throws Exception {
+        final ProcessBuilder pb = projectorBuilder(base, extraEnv);
+        final Map<String, String> env = pb.environment();
+        env.put("PROJECTOR_POSTGRES_URL", jdbcUrl("core"));
+        env.put("PROJECTOR_CORE_JOURNAL_ARCHIVES", "localhost:" + source.controlPort);
+        final Path log = base.resolve("projector-" + System.nanoTime() + ".log");
+        final Process p = start(pb, log);
+        track(Path.of("/dev/shm/aeron-projector-" + p.pid()));
+        return new Projector(p, log);
+    }
+
+    /** A projector with no Postgres and no source: for the cases that must refuse before either is touched. */
+    Projector projectorNoSource(final Path base, final Map<String, String> extraEnv) throws Exception {
+        final ProcessBuilder pb = projectorBuilder(base, extraEnv);
+        pb.environment().put("PROJECTOR_POSTGRES_URL", "jdbc:postgresql://127.0.0.1:" + freePort() + "/core");
+        pb.environment().put("PROJECTOR_CORE_JOURNAL_ARCHIVES", "localhost:" + freePort());
+        final Path log = base.resolve("projector.log");
+        final Process p = start(pb, log);
+        track(Path.of("/dev/shm/aeron-projector-" + p.pid()));
+        return new Projector(p, log);
+    }
+
+    private static ProcessBuilder projectorBuilder(final Path base, final Map<String, String> extraEnv)
+            throws IOException {
+        final List<String> cmd = java(childClasspath(), base);
+        cmd.add(ProjectorMain.class.getName());
+        final ProcessBuilder pb = new ProcessBuilder(cmd);
+        final Map<String, String> env = pb.environment();
+        env.remove(ProjectorDriver.MODE_ENV);
+        env.remove(ProjectorDriver.AERON_DIR_ENV);
+        env.remove("TRANSPORT_EXTERNAL_DRIVER_TIMEOUT_MS");
+        env.put("PROJECTOR_POSTGRES_USER", "core");
+        env.put("PROJECTOR_METRICS_PORT", String.valueOf(freePort()));
+        env.put("PROJECTOR_LOCAL_HOST", "localhost");
+        env.putAll(extraEnv);
+        return pb;
+    }
+
+    private static String childClasspath() {
+        final String override = System.getProperty("projector.driver.classpath");
+        return override == null || override.isEmpty() ? testClasspath() : override;
+    }
+
+    String rows() throws Exception {
+        return query("select count(*) from money_journal");
+    }
+
+    void awaitRows(final Projector p, final int expected, final long timeoutMs) throws Exception {
+        final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        String n;
+        while (!(n = rows()).equals(String.valueOf(expected))) {
+            assertTrue("projected " + n + " of " + expected + " within " + timeoutMs + " ms: " + p.out(),
+                    System.nanoTime() < deadline && p.process.isAlive());
+            Thread.sleep(200);
+        }
+    }
+
+    static int sigterm(final Projector p) throws Exception {
+        p.process.destroy();
+        return awaitExit(p.process, 8_000);
+    }
+
+    static int awaitExit(final Process p, final long timeoutMs) throws Exception {
+        assertTrue("did not exit within " + timeoutMs + " ms", p.waitFor(timeoutMs, TimeUnit.MILLISECONDS));
+        return p.exitValue();
+    }
+
+    static void assertNoCrash(final Path base, final String out) throws IOException {
+        assertFalse("no JVM crash: " + out, out.contains("A fatal error has been detected by the Java Runtime"));
+        try (Stream<Path> files = Files.list(base)) {
+            assertEquals("no hs_err file", List.of(), files.filter(f -> f.getFileName().toString().startsWith("hs_err"))
+                    .toList());
+        }
     }
 
     // ---- small helpers ---------------------------------------------------------------------------------------------

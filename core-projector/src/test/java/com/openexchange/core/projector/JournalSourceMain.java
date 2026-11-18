@@ -3,6 +3,7 @@ package com.openexchange.core.projector;
 
 import com.openexchange.core.infrastructure.journal.generated.JournalDepositEncoder;
 import com.openexchange.core.infrastructure.journal.generated.MessageHeaderEncoder;
+import io.aeron.AeronCounters;
 import io.aeron.ExclusivePublication;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
@@ -23,9 +24,13 @@ import java.nio.charset.StandardCharsets;
 /**
  * Test child: a stand-in for the core's money journal. An archiving media driver of its own (the core side) with
  * its control endpoint on UDP {@code localhost:<port>}, recording {@code aeron:ipc} stream 4101 as the core does
- * ({@code InfrastructureConstants.MONEY_JOURNAL_CHANNEL}), publishing dense JournalDeposit records from journalSeq 1.
- * Each stdin line {@code publish <n>} appends n more; after each batch it prints {@code [SOURCE] recorded <lastSeq>}
- * once the archive has recorded it. Args: {@code <aeronDir> <archiveDir> <controlPort> <initialCount>}.
+ * ({@code InfrastructureConstants.MONEY_JOURNAL_CHANNEL}), publishing dense JournalDeposit records from journalSeq 1,
+ * each a pure function of its journalSeq (so a restarted source re-records the same bytes, as a core member's log
+ * replay does). Each stdin line {@code publish <n>} appends n more; after each batch it prints
+ * {@code [SOURCE] recorded <lastSeq>} once the archive has recorded it. The line {@code replays} prints
+ * {@code [SOURCE] replays <n>}: the replay sessions this archive runs (its replay session count counter).
+ * Args: {@code <aeronDir> <archiveDir> <controlPort> <initialCount> [fresh|keep]};
+ * {@code keep} opens the archive left by a killed source instead of deleting it (a member restart).
  */
 public final class JournalSourceMain {
 
@@ -36,11 +41,12 @@ public final class JournalSourceMain {
         final File archiveDir = new File(args[1]);
         final String control = "aeron:udp?endpoint=localhost:" + args[2];
         final int initial = Integer.parseInt(args[3]);
+        final boolean keep = args.length > 4 && "keep".equals(args[4]);
 
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(
                 new MediaDriver.Context().aeronDirectoryName(aeronDir).threadingMode(ThreadingMode.SHARED)
                         .dirDeleteOnStart(true).dirDeleteOnShutdown(true),
-                new Archive.Context().aeronDirectoryName(aeronDir).archiveDir(archiveDir).deleteArchiveOnStart(true)
+                new Archive.Context().aeronDirectoryName(aeronDir).archiveDir(archiveDir).deleteArchiveOnStart(!keep)
                         .threadingMode(ArchiveThreadingMode.SHARED).controlChannel(control)
                         .replicationChannel("aeron:udp?endpoint=localhost:0").recordingEventsEnabled(false)
                         .segmentFileLength(1024 * 1024));
@@ -64,11 +70,28 @@ public final class JournalSourceMain {
             while ((line = in.readLine()) != null) {
                 if (line.startsWith("publish ")) {
                     seq = publish(pub, counters, counterId, seq, Integer.parseInt(line.substring(8).trim()));
+                } else if ("replays".equals(line.trim())) {
+                    System.out.println("[SOURCE] replays " + replays(counters));
                 }
             }
             // stdin closed: keep the source up until the test kills it
             Thread.currentThread().join();
         }
+    }
+
+    /**
+     * The replay sessions this archive runs now (its replay session count counter): the resource the archive's replay
+     * cap counts. A stopped replay leaves it at once; a replay whose subscriber died leaves it when the archive notices
+     * its publication lost the connection.
+     */
+    static int replays(final CountersReader counters) {
+        final long[] n = {0};
+        counters.forEach((counterId, typeId, keyBuffer, label) -> {
+            if (typeId == AeronCounters.ARCHIVE_REPLAY_SESSION_COUNT_TYPE_ID) {
+                n[0] += counters.getCounterValue(counterId);
+            }
+        });
+        return (int) n[0];
     }
 
     private static long publish(final ExclusivePublication pub, final CountersReader counters, final int counterId,
@@ -80,7 +103,8 @@ public final class JournalSourceMain {
         for (int i = 0; i < count; i++) {
             seq++;
             deposit.wrapAndApplyHeader(buffer, 0, header).journalSeq(seq).userId(1000 + seq).assetId(1)
-                    .amount(100_000_000L).balanceAfter(100_000_000L * seq).clusterTimeMs(1_700_000_000_000L + seq);
+                    .amount(100_000_000L).balanceAfter(100_000_000L * seq).clusterTimeMs(1_700_000_000_000L + seq)
+                    .logPosition(4_096L * seq);
             final int length = MessageHeaderEncoder.ENCODED_LENGTH + deposit.encodedLength();
             while (pub.offer(buffer, 0, length) < 0) {
                 Thread.sleep(1);

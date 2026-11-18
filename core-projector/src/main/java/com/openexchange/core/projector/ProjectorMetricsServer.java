@@ -73,7 +73,8 @@ public final class ProjectorMetricsServer {
 
     String render() {
         final StringBuilder sb = new StringBuilder(1024);
-        gauge(sb, "projector_halted", "1 if the projector is halted on a detected gap, else 0",
+        gauge(sb, "projector_halted",
+                "1 if the projector is parked (a gap on every source, a payload conflict, a refused version), else 0",
                 state.halted ? 1 : 0);
         gauge(sb, "projector_pg_connected", "1 if the projector's last Postgres flush/connect succeeded, else 0",
                 state.connectedToPg ? 1 : 0);
@@ -81,12 +82,28 @@ public final class ProjectorMetricsServer {
         counter(sb, "projector_errors_total", "Epoch failures since process start", state.errors);
         counter(sb, "projector_rows_projected_total",
                 "Journal records durably committed to Postgres", state.rowsProjected);
-        counter(sb, "projector_skipped_records_total",
-                "Journal records skipped as already-projected (journalSeq <= the Postgres high-water)",
-                state.skippedRecords);
+        counter(sb, "projector_duplicate_records_total",
+                "Journal records at or below the high-water: not inserted, each compared with its stored rows",
+                state.duplicateRecords);
+        counter(sb, "projector_payload_conflicts_total",
+                "Duplicates that differed from their stored rows (a determinism fault) - MUST stay 0",
+                state.payloadConflicts);
+        counter(sb, "projector_source_switches_total",
+                "Gaps on one source answered by reading the next source before parking",
+                state.sourceSwitches);
+        counter(sb, "projector_version_refusals_total",
+                "Records of a money journal version this projector does not read - MUST stay 0",
+                state.versionRefusals);
         counter(sb, "projector_gaps_detected_total",
                 "Dense journalSeq gaps detected (a lost money movement) - MUST stay 0; alert on any increase",
                 state.gapsDetected);
+        gauge(sb, "projector_gap_pending",
+                "1 while a gap one source showed is neither filled by another source nor parked on, else 0; "
+                        + "it parks after PROJECTOR_GAP_UNFILLED_PARK_MS",
+                state.gapPending ? 1 : 0);
+        gauge(sb, "projector_gap_high_water",
+                "Postgres high-water right below the pending gap (meaningful while projector_gap_pending is 1)",
+                state.gapPendingHighWater);
         counter(sb, "projector_source_stalls_total",
                 "Journal-source stalls/losses detected and recovered by epoch restart - investigate if climbing",
                 state.sourceStalls);

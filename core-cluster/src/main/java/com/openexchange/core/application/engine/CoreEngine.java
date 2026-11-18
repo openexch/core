@@ -246,7 +246,7 @@ public final class CoreEngine {
             if (journalEnabled) {
                 emitOpeningEpochIfPending();
                 journal.onDeposit(++journalSeq, c.getUserId(), c.getAssetId(), c.getAmount(),
-                        a.available(c.getAssetId()) + a.locked(c.getAssetId()), timestamp);
+                        a.available(c.getAssetId()) + a.locked(c.getAssetId()), timestamp, logPosition);
             }
             if (c.hasRequestId()) {
                 orders.rememberMoney(c.getUserId(), c.getRequestIdHigh(), c.getRequestIdLow(), fingerprint,
@@ -294,7 +294,7 @@ public final class CoreEngine {
             if (journalEnabled) {
                 emitOpeningEpochIfPending();
                 journal.onWithdraw(++journalSeq, c.getUserId(), c.getAssetId(), c.getAmount(),
-                        a.available(c.getAssetId()) + a.locked(c.getAssetId()), timestamp);
+                        a.available(c.getAssetId()) + a.locked(c.getAssetId()), timestamp, logPosition);
             }
             if (c.hasRequestId()) {
                 orders.rememberMoney(c.getUserId(), c.getRequestIdHigh(), c.getRequestIdLow(), fingerprint,
@@ -460,7 +460,7 @@ public final class CoreEngine {
                     buyerUser, sellerUser, c.isTakerIsBuy(),
                     buyer.available(base) + buyer.locked(base), buyer.available(quote) + buyer.locked(quote),
                     seller.available(base) + seller.locked(base), seller.available(quote) + seller.locked(quote),
-                    timestamp);
+                    timestamp, logPosition);
         }
         return true;
     }
@@ -516,7 +516,7 @@ public final class CoreEngine {
         }
         for (int i = 0; i < epochScratch.size(); i++) {
             final long[] row = epochScratch.get(i);
-            journal.onOpeningBalance(++journalSeq, row[0], (int) row[1], row[2]);
+            journal.onOpeningBalance(++journalSeq, row[0], (int) row[1], row[2], logPosition);
         }
         epochScratch.clear();
     }

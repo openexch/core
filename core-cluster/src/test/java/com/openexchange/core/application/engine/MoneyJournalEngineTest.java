@@ -34,16 +34,19 @@ public class MoneyJournalEngineTest {
     private static final class RecordingJournal implements MoneyJournalSink {
         final List<String> lines = new ArrayList<>();
         final List<Long> seqs = new ArrayList<>();
+        final List<Long> positions = new ArrayList<>();
 
         @Override
-        public void onOpeningBalance(long journalSeq, long userId, int assetId, long amount) {
+        public void onOpeningBalance(long journalSeq, long userId, int assetId, long amount, long logPosition) {
+            positions.add(logPosition);
             seqs.add(journalSeq);
             lines.add("OPENING seq=" + journalSeq + " u=" + userId + " asset=" + assetId + " amt=" + amount);
         }
 
         @Override
         public void onDeposit(long journalSeq, long userId, int assetId, long amount,
-                              long balanceAfter, long clusterTimeMs) {
+                              long balanceAfter, long clusterTimeMs, long logPosition) {
+            positions.add(logPosition);
             seqs.add(journalSeq);
             lines.add("DEPOSIT seq=" + journalSeq + " u=" + userId + " asset=" + assetId + " amt=" + amount
                     + " after=" + balanceAfter + " t=" + clusterTimeMs);
@@ -51,7 +54,8 @@ public class MoneyJournalEngineTest {
 
         @Override
         public void onWithdraw(long journalSeq, long userId, int assetId, long amount,
-                               long balanceAfter, long clusterTimeMs) {
+                               long balanceAfter, long clusterTimeMs, long logPosition) {
+            positions.add(logPosition);
             seqs.add(journalSeq);
             lines.add("WITHDRAW seq=" + journalSeq + " u=" + userId + " asset=" + assetId + " amt=" + amount
                     + " after=" + balanceAfter + " t=" + clusterTimeMs);
@@ -61,7 +65,8 @@ public class MoneyJournalEngineTest {
         public void onSettle(long journalSeq, long tradeId, int marketId, long price, long quantity,
                              long buyerUserId, long sellerUserId, boolean takerIsBuy,
                              long buyerBaseAfter, long buyerQuoteAfter,
-                             long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs) {
+                             long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs, long logPosition) {
+            positions.add(logPosition);
             seqs.add(journalSeq);
             lines.add("SETTLE seq=" + journalSeq + " trade=" + tradeId + " market=" + marketId
                     + " px=" + price + " qty=" + quantity
@@ -99,6 +104,28 @@ public class MoneyJournalEngineTest {
         final SetMoneyJournalCommand c = new SetMoneyJournalCommand();
         c.setEnabled(enabled);
         engine.applyCommand(CoreEngine.CMD_SET_MONEY_JOURNAL, c, TS);
+    }
+
+    // ---- the log position of the applying entry on every record ----
+
+    @Test
+    public void everyRecordCarriesTheLogPositionOfTheEntryThatProducedIt() {
+        newEngine();
+        deposit(100, BTC, FixedPoint.fromDouble(1.0));
+        deposit(200, USD, FixedPoint.fromDouble(60000.0));
+        armJournal();
+        engine.setLogPosition(4_160L);
+        deposit(300, USD, FixedPoint.fromDouble(100.0)); // engages journaling: two epoch rows, then the deposit
+        engine.setLogPosition(8_384L);
+        hold(1L, 100, BTC, FixedPoint.fromDouble(1.0));
+        hold(2L, 200, USD, FixedPoint.fromDouble(60000.0));
+        engine.setLogPosition(12_608L);
+        settle(1L, 1, 2L, 200, 1L, 100, FixedPoint.fromDouble(60000.0), FixedPoint.fromDouble(1.0), true);
+        engine.setLogPosition(16_832L);
+        withdraw(200, BTC, FixedPoint.fromDouble(0.4));
+        assertEquals("epoch rows carry the engaging movement's position; each movement its own entry's",
+                List.of(4_160L, 4_160L, 4_160L, 12_608L, 16_832L), journal.positions);
+        journal.assertDense();
     }
 
     // ---- the approved scenario: epoch on a pre-funded ledger, then deposit -> settle -> withdraw ----

@@ -16,20 +16,34 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 
+import java.nio.ByteOrder;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * The money projector's engine: core money journal -> filter -> Postgres.
  *
  * Stateless with respect to journal position. Every epoch reads the Postgres high-water
  * ({@code MAX(journal_seq)}, 0 on an empty ledger), builds a fresh {@link ProjectorFilter}, then
- * replays every money-journal recording from the earliest retained byte forward: the filter skips
- * what Postgres already has (dense journalSeq dedupe), and a dense journalSeq gap HALTS the
- * projector (correctness over liveness: a gap is a lost money movement). Postgres is authoritative;
- * a PG failure never skips, it rolls back the batch, tears down the epoch and retries from the
- * unchanged high-water.
+ * replays every money-journal recording from the earliest retained byte forward. Postgres is
+ * authoritative; a PG failure never skips, it rolls back the batch, tears down the epoch and retries
+ * from the unchanged high-water.
+ *
+ * What it does with a record:
+ *  - above the high-water and dense: projected (inserted in journalSeq order, committed in batches);
+ *  - at or below the high-water (replay overlap, a restarted member's re-recorded journal): never
+ *    inserted, always compared with its stored rows field for field; a difference (or no stored row)
+ *    is a determinism fault and PARKS the projector with PAYLOAD_CONFLICT, never a silent skip;
+ *  - past a dense gap: that source's fault while another configured source has not shown the same gap:
+ *    everything below the gap is committed and the next epoch reads the next source; only a gap that
+ *    every configured source shows at the same high-water PARKS the projector (a lost money movement);
+ *  - of a journal version other than {@link #JOURNAL_VERSION}: PARKS the projector (a version 1 record
+ *    has no log position; a later version is unknown to this build).
+ * A parked projector keeps serving /health and /metrics; a human decides, then restarts it.
  *
  * Source death is detected the same three ways as the settlement bridge, because a dead source
  * otherwise looks exactly like a quiet market: (1) a replay image that existed and vanished; (2) a
@@ -51,6 +65,10 @@ public final class ProjectorAgent implements Runnable {
     /** Flush the pending batch once it reaches this many records mid-burst (bounds memory + latency). */
     private static final int FLUSH_MAX_BATCH = 256;
     private static final int SCHEMA_ID = JournalDepositDecoder.SCHEMA_ID;
+    /** The one money journal version this build reads: version 2 carries the log position on every record. */
+    static final int JOURNAL_VERSION = JournalDepositDecoder.SCHEMA_VERSION;
+    /** Byte offset of journalSeq in every money journal message, in every version (header 8, first field). */
+    private static final int JOURNAL_SEQ_OFFSET = MessageHeaderDecoder.ENCODED_LENGTH;
 
     private final ProjectorConfig config;
     private final String aeronDirectoryName;
@@ -68,9 +86,27 @@ public final class ProjectorAgent implements Runnable {
 
     /** Records projected this epoch but not yet committed (journalSeq order preserved). */
     private final List<MoneyJournalRecord> pending = new ArrayList<>();
+    /** Records at or below the high-water read this epoch and not yet compared with their stored rows. */
+    private final List<MoneyJournalRecord> duplicates = new ArrayList<>();
+    /** Sources that showed a dense gap right above {@link #gapHighWater}; reset when the high-water moves. */
+    private final Set<String> gappedSources = new LinkedHashSet<>();
+    private long gapHighWater = -1;
+    /**
+     * When the first source showed the current gap, moved forward while a source that has not shown it delivers
+     * records below it; the gap parks once no such source delivered anything within the setting.
+     */
+    private long gapPendingSinceMs;
+
+    /** True in production; a test control turns it off to show the duplicate comparison is what parks. */
+    private final boolean compareDuplicates;
+    /** True in production; a test control turns it off to show the source switch is what fills a one-member gap. */
+    private final boolean switchSourceOnGap;
 
     private volatile boolean running = true;
     private ProjectorFilter filter;
+    private String currentSource = "";
+    /** Set by a gap on the current source: the epoch ends and the next one reads another source. */
+    private boolean epochOver;
     private long lastStatusLogMs;
 
     public ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
@@ -81,11 +117,21 @@ public final class ProjectorAgent implements Runnable {
     public ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
                           final ProjectorState state, final PostgresMoneyJournalStore store,
                           final ErrorHandler aeronErrorHandler) {
+        this(config, aeronDirectoryName, state, store, aeronErrorHandler, true, true);
+    }
+
+    /** Tests only: {@code false} turns a money control off, to show that the control is what a test observes. */
+    ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
+                   final ProjectorState state, final PostgresMoneyJournalStore store,
+                   final ErrorHandler aeronErrorHandler, final boolean compareDuplicates,
+                   final boolean switchSourceOnGap) {
         this.config = config;
         this.aeronDirectoryName = aeronDirectoryName;
         this.state = state;
         this.store = store;
         this.aeronErrorHandler = aeronErrorHandler;
+        this.compareDuplicates = compareDuplicates;
+        this.switchSourceOnGap = switchSourceOnGap;
     }
 
     public void stop() {
@@ -98,7 +144,8 @@ public final class ProjectorAgent implements Runnable {
                 + " pg=" + config.postgresUrl + " haltOnGap=" + config.haltOnGap);
         while (running) {
             if (state.halted) {
-                // Parked after a gap: keep the process (and its metrics) alive; a human decides.
+                // Parked (a gap on every source, a payload conflict, a refused version): keep the process
+                // (and its metrics) alive; a human decides.
                 sleep(ERROR_BACKOFF_MS);
                 continue;
             }
@@ -118,15 +165,23 @@ public final class ProjectorAgent implements Runnable {
     private void runEpoch() throws SQLException {
         final long hwm = store.highWater();
         state.connectedToPg = true;
+        if (hwm != gapHighWater) {
+            clearGap(); // the high-water moved: an earlier gap was filled
+        }
+        if (parkIfGapUnfilled()) {
+            return;
+        }
         filter = new ProjectorFilter(hwm, config.haltOnGap);
         pending.clear();
+        duplicates.clear();
+        epochOver = false;
         state.epochHighWater = hwm;
         state.sourceBacklogBytes = 0;
         state.epochs++;
         System.out.println("[PROJECTOR] epoch " + state.epochs + ": Postgres high-water journalSeq=" + hwm);
 
         try (ArchiveJournalSource source = ArchiveJournalSource.connectFirstHealthy(
-                config.journalArchiveEndpoints,
+                sourceOrder(),
                 config.archiveControlStreamId,
                 ProjectorConfig.MONEY_JOURNAL_STREAM_ID,
                 ProjectorConfig.MONEY_JOURNAL_CHANNEL,
@@ -134,9 +189,21 @@ public final class ProjectorAgent implements Runnable {
                 aeronDirectoryName,
                 config.localHost,
                 aeronErrorHandler)) {
-            state.journalSource = source.endpoint();
+            currentSource = source.endpoint();
+            state.journalSource = currentSource;
             followChain(source);
         }
+    }
+
+    /** The configured endpoints, those that showed the current gap last (still tried: they may be the only ones up). */
+    private List<String> sourceOrder() {
+        final List<String> first = new ArrayList<>();
+        final List<String> last = new ArrayList<>();
+        for (final String e : config.journalArchiveEndpoints) {
+            (gappedSources.contains(e.trim()) ? last : first).add(e.trim());
+        }
+        first.addAll(last);
+        return first;
     }
 
     private void followChain(final ArchiveJournalSource source) {
@@ -159,13 +226,19 @@ public final class ProjectorAgent implements Runnable {
                 long consumedAtLastCheck = NO_PRIOR_CHECK;
                 boolean imageWasLive = false;
                 boolean followedRecordingEnded = false;
-                while (running && !state.halted) {
+                while (running && !state.halted && !epochOver) {
                     final int fragments = source.poll(replay, handler, POLL_LIMIT);
                     maybeLogStatus();
                     imageWasLive |= replay.imageCount() > 0;
+                    if (epochOver || state.halted) {
+                        break;
+                    }
                     if (fragments == 0) {
-                        // Caught up for now: durably commit whatever this batch projected.
-                        flushPending();
+                        // Caught up for now: compare the duplicates read, durably commit what this batch projected.
+                        flush();
+                        if (state.halted || parkIfGapUnfilled()) {
+                            break;
+                        }
                         if (!liveFollow && replayDrained(replay, recording)) {
                             break; // stopped recording fully consumed -> next in chain
                         }
@@ -216,8 +289,8 @@ public final class ProjectorAgent implements Runnable {
                         }
                         idle.idle();
                     } else {
-                        if (pending.size() >= FLUSH_MAX_BATCH) {
-                            flushPending();
+                        if (pending.size() >= FLUSH_MAX_BATCH || duplicates.size() >= FLUSH_MAX_BATCH) {
+                            flush();
                         }
                         idle.reset();
                     }
@@ -226,7 +299,7 @@ public final class ProjectorAgent implements Runnable {
                     break; // end the epoch: the next one re-lists and follows the successor
                 }
             }
-            if (!running || state.halted) {
+            if (!running || state.halted || epochOver) {
                 return;
             }
         }
@@ -249,76 +322,234 @@ public final class ProjectorAgent implements Runnable {
     }
 
     /**
-     * Decode one journal fragment and hand its dense journalSeq to the filter. Only build the
-     * (allocating) {@link MoneyJournalRecord} on PROJECT, so replay-overlap SKIPs stay cheap.
+     * Decode one journal fragment into a {@link MoneyJournalRecord} and act on the filter's answer. After a gap ended
+     * the epoch or the projector parked, the rest of the poll batch is ignored.
      */
     private void onJournalEntry(final DirectBuffer buffer, final int offset) {
+        if (epochOver || state.halted) {
+            return;
+        }
         journalHeader.wrap(buffer, offset);
         if (journalHeader.schemaId() != SCHEMA_ID) {
             return; // foreign schema on the journal stream - ignore
         }
-        switch (journalHeader.templateId()) {
+        final int templateId = journalHeader.templateId();
+        if (templateId < JournalOpeningBalanceDecoder.TEMPLATE_ID || templateId > JournalSettleDecoder.TEMPLATE_ID) {
+            return; // unknown template on schema 3 - ignore (its journalSeq shows as a gap on the next record)
+        }
+        if (journalHeader.version() != JOURNAL_VERSION) {
+            refuseVersion(journalHeader.version(), templateId,
+                    buffer.getLong(offset + JOURNAL_SEQ_OFFSET, ByteOrder.LITTLE_ENDIAN));
+            return;
+        }
+        final MoneyJournalRecord r;
+        final String kind;
+        switch (templateId) {
             case JournalOpeningBalanceDecoder.TEMPLATE_ID -> {
                 openingDecoder.wrapAndApplyHeader(buffer, offset, journalHeader);
-                final long seq = openingDecoder.journalSeq();
-                switch (filter.onRecord(seq)) {
-                    case PROJECT -> pending.add(MoneyJournalRecord.opening(seq,
-                            openingDecoder.userId(), openingDecoder.assetId(), openingDecoder.amount()));
-                    case SKIP -> state.skippedRecords++;
-                    case HALT -> haltOnGap("opening", seq);
-                }
+                kind = "opening";
+                r = MoneyJournalRecord.opening(openingDecoder.journalSeq(), openingDecoder.userId(),
+                        openingDecoder.assetId(), openingDecoder.amount(), openingDecoder.logPosition());
             }
             case JournalDepositDecoder.TEMPLATE_ID -> {
                 depositDecoder.wrapAndApplyHeader(buffer, offset, journalHeader);
-                final long seq = depositDecoder.journalSeq();
-                switch (filter.onRecord(seq)) {
-                    case PROJECT -> pending.add(MoneyJournalRecord.deposit(seq,
-                            depositDecoder.userId(), depositDecoder.assetId(), depositDecoder.amount(),
-                            depositDecoder.balanceAfter(), depositDecoder.clusterTimeMs()));
-                    case SKIP -> state.skippedRecords++;
-                    case HALT -> haltOnGap("deposit", seq);
-                }
+                kind = "deposit";
+                r = MoneyJournalRecord.deposit(depositDecoder.journalSeq(), depositDecoder.userId(),
+                        depositDecoder.assetId(), depositDecoder.amount(), depositDecoder.balanceAfter(),
+                        depositDecoder.clusterTimeMs(), depositDecoder.logPosition());
             }
             case JournalWithdrawDecoder.TEMPLATE_ID -> {
                 withdrawDecoder.wrapAndApplyHeader(buffer, offset, journalHeader);
-                final long seq = withdrawDecoder.journalSeq();
-                switch (filter.onRecord(seq)) {
-                    case PROJECT -> pending.add(MoneyJournalRecord.withdraw(seq,
-                            withdrawDecoder.userId(), withdrawDecoder.assetId(), withdrawDecoder.amount(),
-                            withdrawDecoder.balanceAfter(), withdrawDecoder.clusterTimeMs()));
-                    case SKIP -> state.skippedRecords++;
-                    case HALT -> haltOnGap("withdraw", seq);
-                }
+                kind = "withdraw";
+                r = MoneyJournalRecord.withdraw(withdrawDecoder.journalSeq(), withdrawDecoder.userId(),
+                        withdrawDecoder.assetId(), withdrawDecoder.amount(), withdrawDecoder.balanceAfter(),
+                        withdrawDecoder.clusterTimeMs(), withdrawDecoder.logPosition());
             }
-            case JournalSettleDecoder.TEMPLATE_ID -> {
+            default -> {
                 settleDecoder.wrapAndApplyHeader(buffer, offset, journalHeader);
-                final long seq = settleDecoder.journalSeq();
-                switch (filter.onRecord(seq)) {
-                    case PROJECT -> pending.add(MoneyJournalRecord.settle(seq,
-                            settleDecoder.tradeId(), settleDecoder.marketId(), settleDecoder.price(),
-                            settleDecoder.quantity(), settleDecoder.buyerUserId(), settleDecoder.sellerUserId(),
-                            settleDecoder.takerIsBuy() == BoolFlag.TRUE,
-                            settleDecoder.buyerBaseAfter(), settleDecoder.buyerQuoteAfter(),
-                            settleDecoder.sellerBaseAfter(), settleDecoder.sellerQuoteAfter(),
-                            settleDecoder.clusterTimeMs()));
-                    case SKIP -> state.skippedRecords++;
-                    case HALT -> haltOnGap("settle", seq);
-                }
+                kind = "settle";
+                r = MoneyJournalRecord.settle(settleDecoder.journalSeq(), settleDecoder.tradeId(),
+                        settleDecoder.marketId(), settleDecoder.price(), settleDecoder.quantity(),
+                        settleDecoder.buyerUserId(), settleDecoder.sellerUserId(),
+                        settleDecoder.takerIsBuy() == BoolFlag.TRUE,
+                        settleDecoder.buyerBaseAfter(), settleDecoder.buyerQuoteAfter(),
+                        settleDecoder.sellerBaseAfter(), settleDecoder.sellerQuoteAfter(),
+                        settleDecoder.clusterTimeMs(), settleDecoder.logPosition());
             }
-            default -> { /* unknown template on schema 3 - ignore */ }
+        }
+        switch (filter.onRecord(r.journalSeq())) {
+            case PROJECT -> pending.add(r);
+            case DUPLICATE -> onDuplicate(r);
+            case GAP -> onGap(kind, r.journalSeq());
         }
         // Surface the gap counter live in both halt and haltOnGap=false override modes.
         state.gapsDetected = filter.gapsDetected();
     }
 
     /**
-     * Commit the pending batch. On success advance the in-memory progress. On failure count it, drop
-     * the PG-connected flag and THROW: the batch rolled back, the epoch tears down and retries from
-     * the unchanged Postgres high-water (never skip). Preserves journalSeq order: the batch was built
-     * in order and committed atomically, so the high-water only ever advances over committed records.
+     * A record at or below the high-water: queued for comparison with its stored rows. Anything pending is committed
+     * first, so the stored rows of every queued duplicate exist (a duplicate can repeat a record of this epoch).
      */
-    private void flushPending() {
-        if (pending.isEmpty()) {
+    private void onDuplicate(final MoneyJournalRecord r) {
+        state.duplicateRecords++;
+        if (state.gapPending && !gappedSources.contains(currentSource)) {
+            // a source that has not shown the gap is still reading up to it: its catch-up is not silence
+            gapPendingSinceMs = System.currentTimeMillis();
+        }
+        if (!compareDuplicates) {
+            return;
+        }
+        if (!pending.isEmpty()) {
+            flush();
+            if (state.halted) {
+                return;
+            }
+        }
+        duplicates.add(r);
+    }
+
+    /**
+     * A dense gap on the current source. Everything below it is committed first. While another configured source has
+     * not shown a gap at this high-water, the epoch ends and the next one reads that source; a gap every source shows
+     * parks the projector.
+     */
+    private void onGap(final String kind, final long seq) {
+        // Persist everything strictly below the gap (throws on PG failure -> the epoch retries and re-detects the
+        // gap; nothing below it is lost).
+        flush();
+        if (state.halted) {
+            return;
+        }
+        state.gapsDetected = filter.gapsDetected();
+        final long below = filter.highWater();
+        if (below != gapHighWater || gappedSources.isEmpty()) {
+            gappedSources.clear();
+            gapHighWater = below;
+            gapPendingSinceMs = System.currentTimeMillis();
+            state.gapPendingHighWater = below;
+            state.gapPending = true;
+        }
+        final boolean seenBefore = !gappedSources.add(currentSource);
+        if (switchSourceOnGap && !allSourcesGapped()) {
+            state.sourceSwitches++;
+            epochOver = true;
+            System.err.println("[PROJECTOR] dense journalSeq gap on source " + currentSource + ": " + kind
+                    + " journalSeq=" + seq + " after high-water=" + below + " | a source fault while another member "
+                    + "may hold the range: reading the next source before parking (sources with this gap: "
+                    + gappedSources + ")");
+            if (seenBefore) {
+                sleep(ERROR_BACKOFF_MS); // this source again: the others were unreachable; do not spin on it
+            }
+            return;
+        }
+        park("GAP", "*** HALTED - LOST MONEY MOVEMENT SUSPECTED *** dense journalSeq gap: "
+                + kind + " journalSeq=" + seq + " after high-water=" + below + " on "
+                + (switchSourceOnGap ? "every configured source " + gappedSources : "source " + currentSource)
+                + " | a journal gap means a money movement Postgres will never see; NOT projecting past it. "
+                + "Investigate the core journal archives and the money_journal table, then restart the projector.");
+    }
+
+    private void clearGap() {
+        gappedSources.clear();
+        state.gapPending = false;
+    }
+
+    /**
+     * A gap one source showed that no other source filled, or read towards, within
+     * {@link ProjectorConfig#gapUnfilledParkMs} (they are empty, quiet at the high-water, or unreachable) parks the
+     * projector: it is not left waiting unseen.
+     */
+    private boolean parkIfGapUnfilled() {
+        if (gappedSources.isEmpty()
+                || System.currentTimeMillis() - gapPendingSinceMs < config.gapUnfilledParkMs) {
+            return false;
+        }
+        final List<String> silent = new ArrayList<>();
+        for (final String e : config.journalArchiveEndpoints) {
+            if (!gappedSources.contains(e.trim())) {
+                silent.add(e.trim());
+            }
+        }
+        park("GAP", "*** HALTED - LOST MONEY MOVEMENT SUSPECTED *** dense journalSeq gap after high-water="
+                + gapHighWater + " shown by " + gappedSources + " and not filled within " + config.gapUnfilledParkMs
+                + " ms by " + silent + " (empty, quiet at the high-water, or unreachable) | NOT projecting past it. "
+                + "Investigate the core journal archives and the money_journal table, then restart the projector.");
+        return true;
+    }
+
+    private boolean allSourcesGapped() {
+        for (final String e : config.journalArchiveEndpoints) {
+            if (!gappedSources.contains(e.trim())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void refuseVersion(final int version, final int templateId, final long seq) {
+        flush();
+        if (state.halted) {
+            return;
+        }
+        state.versionRefusals++;
+        park("VERSION", "*** HALTED - MONEY JOURNAL VERSION REFUSED *** record version " + version + " (template "
+                + templateId + ", journalSeq " + seq + ") from source " + currentSource + "; this projector reads "
+                + "version " + JOURNAL_VERSION + " only: a version 1 record carries no log position, a later version "
+                + "is unknown to this build. Nothing past it is projected.");
+    }
+
+    /** Compare the queued duplicates with their stored rows; a difference or a missing row parks the projector. */
+    private void compareQueuedDuplicates() {
+        if (duplicates.isEmpty()) {
+            return;
+        }
+        final List<Long> seqs = new ArrayList<>(duplicates.size());
+        for (final MoneyJournalRecord r : duplicates) {
+            seqs.add(r.journalSeq());
+        }
+        final Map<Long, MoneyJournalRecord> stored;
+        try {
+            stored = store.load(seqs);
+        } catch (SQLException e) {
+            state.pgFlushFailures++;
+            state.connectedToPg = false;
+            throw new IllegalStateException("postgres compare failed (the epoch re-reads and compares again): "
+                    + e.getMessage(), e);
+        }
+        for (final MoneyJournalRecord r : duplicates) {
+            final MoneyJournalRecord s = stored.get(r.journalSeq());
+            if (!r.equals(s)) {
+                duplicates.clear();
+                state.payloadConflicts++;
+                park("PAYLOAD_CONFLICT", "*** HALTED - PAYLOAD_CONFLICT *** money journal record journalSeq="
+                        + r.journalSeq() + " from source " + currentSource + " differs from what Postgres holds: "
+                        + "journal=" + r + " stored=" + (s == null ? "none (no row below the high-water)" : s)
+                        + " | a changed duplicate is a determinism fault: nothing is projected past it. Compare the "
+                        + "members' money journals at this journalSeq, then restart the projector.");
+                return;
+            }
+        }
+        duplicates.clear();
+    }
+
+    private void park(final String reason, final String text) {
+        state.haltReason = reason;
+        state.halted = true;
+        pending.clear(); // uncommitted records are re-read after the restart; nothing past the fault is committed
+        System.err.println("[PROJECTOR] " + text + " " + state.render());
+    }
+
+    /**
+     * Compare the queued duplicates, then commit the pending batch. On success advance the in-memory
+     * progress. On failure count it, drop the PG-connected flag and THROW: the batch rolled back, the
+     * epoch tears down and retries from the unchanged Postgres high-water (never skip). Preserves
+     * journalSeq order: the batch was built in order and committed atomically, so the high-water only
+     * ever advances over committed records. A conflict found by the comparison parks the projector and
+     * commits nothing.
+     */
+    private void flush() {
+        compareQueuedDuplicates();
+        if (state.halted || pending.isEmpty()) {
             return;
         }
         try {
@@ -327,25 +558,15 @@ public final class ProjectorAgent implements Runnable {
             state.rowsProjected += pending.size();
             state.lastJournalSeq = pending.get(pending.size() - 1).journalSeq();
             pending.clear();
+            if (state.lastJournalSeq > gapHighWater) {
+                clearGap(); // another source filled the gap
+            }
         } catch (SQLException e) {
             state.pgFlushFailures++;
             state.connectedToPg = false;
             throw new IllegalStateException("postgres flush failed (batch kept for retry): "
                     + e.getMessage(), e);
         }
-    }
-
-    private void haltOnGap(final String kind, final long seq) {
-        // Persist everything strictly below the gap before parking (throws on PG failure -> the epoch
-        // retries and re-detects the gap; nothing below it is lost).
-        flushPending();
-        state.gapsDetected = filter.gapsDetected();
-        state.halted = true;
-        System.err.println("[PROJECTOR] *** HALTED - LOST MONEY MOVEMENT SUSPECTED *** dense journalSeq gap: "
-                + kind + " journalSeq=" + seq + " after high-water=" + filter.highWater()
-                + " | a journal gap means a money movement Postgres will never see; NOT projecting past it. "
-                + "Investigate the core journal archives and the money_journal table, then restart the projector. "
-                + state.render());
     }
 
     private void maybeLogStatus() {

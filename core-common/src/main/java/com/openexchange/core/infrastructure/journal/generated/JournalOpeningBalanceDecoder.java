@@ -10,11 +10,11 @@ import org.agrona.DirectBuffer;
 @SuppressWarnings("all")
 public final class JournalOpeningBalanceDecoder
 {
-    public static final int BLOCK_LENGTH = 28;
+    public static final int BLOCK_LENGTH = 36;
     public static final int TEMPLATE_ID = 1;
     public static final int SCHEMA_ID = 3;
-    public static final int SCHEMA_VERSION = 1;
-    public static final String SEMANTIC_VERSION = "0.1";
+    public static final int SCHEMA_VERSION = 2;
+    public static final String SEMANTIC_VERSION = "0.2";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final JournalOpeningBalanceDecoder parentMessage = this;
@@ -336,6 +336,62 @@ public final class JournalOpeningBalanceDecoder
     }
 
 
+    public static int logPositionId()
+    {
+        return 5;
+    }
+
+    public static int logPositionSinceVersion()
+    {
+        return 2;
+    }
+
+    public static int logPositionEncodingOffset()
+    {
+        return 28;
+    }
+
+    public static int logPositionEncodingLength()
+    {
+        return 8;
+    }
+
+    public static String logPositionMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static long logPositionNullValue()
+    {
+        return -9223372036854775808L;
+    }
+
+    public static long logPositionMinValue()
+    {
+        return -9223372036854775807L;
+    }
+
+    public static long logPositionMaxValue()
+    {
+        return 9223372036854775807L;
+    }
+
+    public long logPosition()
+    {
+        if (parentMessage.actingVersion < 2)
+        {
+            return -9223372036854775808L;
+        }
+
+        return buffer.getLong(offset + 28, BYTE_ORDER);
+    }
+
+
     public String toString()
     {
         if (null == buffer)
@@ -388,6 +444,9 @@ public final class JournalOpeningBalanceDecoder
         builder.append('|');
         builder.append("amount=");
         builder.append(this.amount());
+        builder.append('|');
+        builder.append("logPosition=");
+        builder.append(this.logPosition());
 
         limit(originalLimit);
 

@@ -8,7 +8,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * PostgreSQL-backed money-journal store: one batched, atomic transaction projects a run of
@@ -22,14 +25,20 @@ import java.util.List;
  * committed journalSeq (replay overlap, epoch restart, retry after a partial-looking failure)
  * inserts nothing new. Postgres is the projector's authoritative high-water: nothing is skipped
  * on a failure, the whole transaction rolls back and is retried from the (unchanged) PG high-water.
+ * A record at or below the high-water is not inserted at all: the agent compares it with
+ * {@link #load stored rows} and halts on a difference.
+ *
+ * The canonical dump ({@link #CANONICAL_DUMP}, {@link #canonicalDump}) names every column that is a function of the
+ * journal bytes, in a fixed order, ordered by primary key; {@link #WALL_CLOCK_COLUMNS} are the only columns it leaves
+ * out. Two projections of one journal have equal canonical dumps.
  */
 public final class PostgresMoneyJournalStore {
 
     private static final String INSERT_HEADER = """
             INSERT INTO money_journal
-                (journal_seq, movement_type, cluster_time_ms, user_id, asset_id, amount, balance_after,
+                (journal_seq, log_position, movement_type, cluster_time_ms, user_id, asset_id, amount, balance_after,
                  trade_id, market_id, price, quantity, buyer_user_id, seller_user_id, taker_is_buy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (journal_seq) DO NOTHING
             """;
 
@@ -41,6 +50,33 @@ public final class PostgresMoneyJournalStore {
             """;
 
     private static final String MAX_SEQ = "SELECT COALESCE(MAX(journal_seq), 0) FROM money_journal";
+
+    /** Table -> its dumped columns in dump order (the first column, or two, are its primary key). */
+    public static final Map<String, List<String>> CANONICAL_DUMP = Map.of(
+            "money_journal", List.of("journal_seq", "log_position", "movement_type", "cluster_time_ms", "user_id",
+                    "asset_id", "amount", "balance_after", "trade_id", "market_id", "price", "quantity",
+                    "buyer_user_id", "seller_user_id", "taker_is_buy"),
+            "money_journal_leg", List.of("journal_seq", "leg_no", "user_id", "asset_id", "asset_role",
+                    "balance_after", "delta"));
+    /** Table -> its primary key, the dump's order. */
+    public static final Map<String, String> CANONICAL_ORDER = Map.of(
+            "money_journal", "journal_seq",
+            "money_journal_leg", "journal_seq, leg_no");
+    /** The columns that are not a function of the journal (insert time): never dumped, never compared. */
+    public static final Map<String, List<String>> WALL_CLOCK_COLUMNS = Map.of(
+            "money_journal", List.of("ingested_at"),
+            "money_journal_leg", List.of());
+
+    private static final String LOAD_HEADERS = """
+            SELECT journal_seq, log_position, movement_type, cluster_time_ms, user_id, asset_id, amount, balance_after,
+                   trade_id, market_id, price, quantity, buyer_user_id, seller_user_id, taker_is_buy
+            FROM money_journal WHERE journal_seq = ANY (?)
+            """;
+
+    private static final String LOAD_LEGS = """
+            SELECT journal_seq, leg_no, user_id, asset_id, asset_role, balance_after, delta
+            FROM money_journal_leg WHERE journal_seq = ANY (?) ORDER BY journal_seq, leg_no
+            """;
 
     private final HikariDataSource dataSource;
 
@@ -92,26 +128,109 @@ public final class PostgresMoneyJournalStore {
         }
     }
 
+    /**
+     * The stored records of {@code journalSeqs}, rebuilt from their header and leg rows; a journalSeq with no header
+     * row is absent from the answer.
+     */
+    public Map<Long, MoneyJournalRecord> load(final List<Long> journalSeqs) throws SQLException {
+        final Map<Long, MoneyJournalRecord> out = new HashMap<>();
+        if (journalSeqs.isEmpty()) {
+            return out;
+        }
+        try (Connection conn = dataSource.getConnection()) {
+            final java.sql.Array seqs = conn.createArrayOf("bigint", journalSeqs.toArray());
+            final Map<Long, List<MoneyJournalRecord.Leg>> legs = new HashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement(LOAD_LEGS)) {
+                ps.setArray(1, seqs);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        legs.computeIfAbsent(rs.getLong(1), k -> new ArrayList<>()).add(new MoneyJournalRecord.Leg(
+                                rs.getShort(2), rs.getLong(3), nullableInt(rs, 4), nullableShort(rs, 5), rs.getLong(6),
+                                nullableLong(rs, 7)));
+                    }
+                }
+            }
+            try (PreparedStatement ps = conn.prepareStatement(LOAD_HEADERS)) {
+                ps.setArray(1, seqs);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        final long seq = rs.getLong(1);
+                        final boolean taker = rs.getBoolean(15);
+                        final Boolean takerIsBuy = rs.wasNull() ? null : taker;
+                        out.put(seq, MoneyJournalRecord.stored(seq, rs.getLong(2), rs.getShort(3), nullableLong(rs, 4),
+                                nullableLong(rs, 5), nullableInt(rs, 6), nullableLong(rs, 7), nullableLong(rs, 8),
+                                nullableLong(rs, 9), nullableInt(rs, 10), nullableLong(rs, 11), nullableLong(rs, 12),
+                                nullableLong(rs, 13), nullableLong(rs, 14), takerIsBuy,
+                                legs.getOrDefault(seq, List.of())));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The canonical dump: per table in name order, its {@link #CANONICAL_DUMP} columns of every row in primary key
+     * order, one line per row, tab separated, {@code \N} for NULL. Equal for two projections of one journal.
+     */
+    public String canonicalDump() throws SQLException {
+        final StringBuilder sb = new StringBuilder();
+        try (Connection conn = dataSource.getConnection()) {
+            for (final String table : new java.util.TreeSet<>(CANONICAL_DUMP.keySet())) {
+                final List<String> columns = CANONICAL_DUMP.get(table);
+                sb.append("-- ").append(table).append(' ').append(String.join(",", columns)).append('\n');
+                try (PreparedStatement ps = conn.prepareStatement("SELECT " + String.join(", ", columns) + " FROM "
+                        + table + " ORDER BY " + CANONICAL_ORDER.get(table));
+                     ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        for (int i = 1; i <= columns.size(); i++) {
+                            final String v = rs.getString(i);
+                            sb.append(i > 1 ? "\t" : "").append(v == null ? "\\N" : v);
+                        }
+                        sb.append('\n');
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
     private static void bindHeader(final PreparedStatement ps, final MoneyJournalRecord r)
             throws SQLException {
         ps.setLong(1, r.journalSeq());
-        ps.setShort(2, r.movementType());
-        setNullableLong(ps, 3, r.clusterTimeMs());
-        setNullableLong(ps, 4, r.userId());
-        setNullableInt(ps, 5, r.assetId());
-        setNullableLong(ps, 6, r.amount());
-        setNullableLong(ps, 7, r.balanceAfter());
-        setNullableLong(ps, 8, r.tradeId());
-        setNullableInt(ps, 9, r.marketId());
-        setNullableLong(ps, 10, r.price());
-        setNullableLong(ps, 11, r.quantity());
-        setNullableLong(ps, 12, r.buyerUserId());
-        setNullableLong(ps, 13, r.sellerUserId());
+        ps.setLong(2, r.logPosition());
+        ps.setShort(3, r.movementType());
+        setNullableLong(ps, 4, r.clusterTimeMs());
+        setNullableLong(ps, 5, r.userId());
+        setNullableInt(ps, 6, r.assetId());
+        setNullableLong(ps, 7, r.amount());
+        setNullableLong(ps, 8, r.balanceAfter());
+        setNullableLong(ps, 9, r.tradeId());
+        setNullableInt(ps, 10, r.marketId());
+        setNullableLong(ps, 11, r.price());
+        setNullableLong(ps, 12, r.quantity());
+        setNullableLong(ps, 13, r.buyerUserId());
+        setNullableLong(ps, 14, r.sellerUserId());
         if (r.takerIsBuy() == null) {
-            ps.setNull(14, Types.BOOLEAN);
+            ps.setNull(15, Types.BOOLEAN);
         } else {
-            ps.setBoolean(14, r.takerIsBuy());
+            ps.setBoolean(15, r.takerIsBuy());
         }
+    }
+
+    private static Long nullableLong(final ResultSet rs, final int i) throws SQLException {
+        final long v = rs.getLong(i);
+        return rs.wasNull() ? null : v;
+    }
+
+    private static Integer nullableInt(final ResultSet rs, final int i) throws SQLException {
+        final int v = rs.getInt(i);
+        return rs.wasNull() ? null : v;
+    }
+
+    private static Short nullableShort(final ResultSet rs, final int i) throws SQLException {
+        final short v = rs.getShort(i);
+        return rs.wasNull() ? null : v;
     }
 
     private static void bindLeg(final PreparedStatement ps, final long journalSeq,

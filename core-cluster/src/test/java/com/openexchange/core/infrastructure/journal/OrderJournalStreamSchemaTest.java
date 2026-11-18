@@ -59,8 +59,8 @@ public class OrderJournalStreamSchemaTest {
 
     private static byte[] moneyMessage() {
         final MoneyJournal money = new MoneyJournal(64 * 1024);
-        money.onDeposit(1, 7, 0, 100, 100, 1_000);
-        money.onSettle(2, 1, 1, 10, 1, 7, 8, true, 1, 1, 1, 1, 1_000);
+        money.onDeposit(1, 7, 0, 100, 100, 1_000, 64);
+        money.onSettle(2, 1, 1, 10, 1, 7, 8, true, 1, 1, 1, 1, 1_000, 128);
         final List<byte[]> m = drain(money.ringBuffer());
         assertEquals(2, m.size());
         return m.get(1);

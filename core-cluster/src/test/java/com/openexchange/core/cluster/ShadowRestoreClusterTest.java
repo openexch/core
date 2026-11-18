@@ -377,7 +377,7 @@ public class ShadowRestoreClusterTest {
             final RecordedLog early = rig.captureCommitted(f);
             final long pS = early.positions()[early.positions().length - 1];
             produce(rig, f, early, pS, "TAIL base");
-            // more journal entries in (P_s, P_cm] than the restart's ring holds (a deposit entry is 64 ring bytes)
+            // more journal entries in (P_s, P_cm] than the restart's ring holds (a deposit entry is 72 ring bytes)
             final int deposits = SMALL_RING / 64 + 600;
             tool.deposits(deposits);
             final long pCm = rig.snapshotAll();
