@@ -218,8 +218,12 @@ public interface CoreEventSink {
      */
     default void onOrderEventsPage(long correlationId, OrderEventRecords records, long firstEventSeq, int count) { }
 
-    /** ORIGIN terminator for RequestOrderEvents (wire OrderEventsEnd). */
-    default void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) { }
+    /**
+     * ORIGIN terminator for RequestOrderEvents (wire OrderEventsEnd). {@code genesisId} is the recorded CoreConfig's
+     * genesis id, 0 while none is recorded.
+     */
+    default void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq,
+                                  long genesisId) { }
 
     /**
      * ORIGIN reply to RequestUserBalances (wire UserBalances). {@code account} is null when no account record exists

@@ -2742,12 +2742,12 @@ public final class OrderEngine {
         final long firstAvailable = lastSeq - eventRing.count() + 1;
         if (maxEvents == 0 || fromEventSeq < firstAvailable - 1 || fromEventSeq >= lastSeq) {
             // head probe, overrun (the ring no longer holds fromEventSeq + 1), or nothing newer than the cursor
-            sink.onOrderEventsEnd(correlationId, 0, firstAvailable, lastSeq, fromEventSeq);
+            sink.onOrderEventsEnd(correlationId, 0, firstAvailable, lastSeq, fromEventSeq, ledger.recordedGenesisId());
             return;
         }
         final int n = (int) Math.min(Math.min(maxEvents, ORDER_EVENTS_CAP), lastSeq - fromEventSeq);
         sink.onOrderEventsPage(correlationId, eventRing, fromEventSeq + 1, n);
-        sink.onOrderEventsEnd(correlationId, n, firstAvailable, lastSeq, fromEventSeq + n);
+        sink.onOrderEventsEnd(correlationId, n, firstAvailable, lastSeq, fromEventSeq + n, ledger.recordedGenesisId());
     }
 
     /** The replay ring (snapshot section, limits apply, tests). */

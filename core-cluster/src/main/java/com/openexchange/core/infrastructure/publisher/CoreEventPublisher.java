@@ -573,10 +573,11 @@ public final class CoreEventPublisher implements CoreEventSink {
     }
 
     @Override
-    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq) {
+    public void onOrderEventsEnd(long correlationId, int count, long firstAvailableSeq, long lastSeq, long nextFromSeq,
+                                 long genesisId) {
         orderEventsEndEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
                 .correlationId(correlationId).count(count).firstAvailableSeq(firstAvailableSeq).lastSeq(lastSeq)
-                .nextFromSeq(nextFromSeq);
+                .nextFromSeq(nextFromSeq).genesisId(genesisId);
         flush(orderEventsEndEncoder.encodedLength(), CH_SNAPSHOTS, Routing.ORIGIN);
     }
 
@@ -613,7 +614,7 @@ public final class CoreEventPublisher implements CoreEventSink {
                 .limitsVersion(r.limitsVersion()).requestTtlMs(r.requestTtlMs()).requestPerUserCap(r.requestPerUserCap())
                 .orderEventRingCapacity(r.orderEventRingCapacity())
                 .gateState(com.openexchange.core.infrastructure.generated.GateState.get((short) r.gateStateCode()))
-                .asOfLogPosition(asOfLogPosition);
+                .asOfLogPosition(asOfLogPosition).genesisId(r.genesisId());
         // the reason sets are written as their raw bitmask: one bit per GateReason value, exactly the engine's set
         buffer.putInt(MessageHeaderEncoder.ENCODED_LENGTH + CoreConfigReportEncoder.gateReasonsEncodingOffset(), r.gateReasons(),
                 java.nio.ByteOrder.LITTLE_ENDIAN);

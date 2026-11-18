@@ -2,9 +2,9 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="com.openexchange.core.infrastructure.generated"
                    id="2"
-                   version="8"
-                   semanticVersion="0.8"
-                   description="OMS + ledger core schema (money-schema v8): balances, holds, settlement, order lifecycle, ME feed, admin, session, gateway queries. All amounts are 8dp fixed-point int64. One schema, one demuxer, one exact-version gate."
+                   version="9"
+                   semanticVersion="0.9"
+                   description="OMS + ledger core schema (money-schema v9): balances, holds, settlement, order lifecycle, ME feed, admin, session, gateway queries, the genesis id on the query replies. All amounts are 8dp fixed-point int64. One schema, one demuxer, one exact-version gate."
 >
     <types>
         <composite name="messageHeader" description="Message identifiers and length of message root">
@@ -1090,6 +1090,7 @@
         <field name="firstAvailableSeq" id="3" type="int64"/>
         <field name="lastSeq"           id="4" type="int64"/>
         <field name="nextFromSeq"       id="5" type="int64"/>
+        <field name="genesisId"         id="6" type="int64" sinceVersion="9" description="v9: the genesisId of the recorded CoreConfig, 0 while no CoreConfig is recorded. Replicated state: every member answers the same value."/>
     </sbe:message>
 
     <sbe:message name="UserBalances" id="117" sinceVersion="8" description="ORIGIN reply to RequestUserBalances, one frame. known = an account record exists for the user. balances: one entry per asset with a nonzero available or locked amount, ascending assetId; an absent asset is zero.">
@@ -1115,6 +1116,7 @@
         <field name="gateState"              id="8"  type="GateState"/>
         <field name="gateReasons"            id="9"  type="GateReasons"/>
         <field name="asOfLogPosition"        id="10" type="int64"/>
+        <field name="genesisId"              id="11" type="int64" sinceVersion="9" description="v9: the genesisId of the recorded CoreConfig, 0 while no CoreConfig is recorded. Replicated state: every member answers the same value."/>
         <group name="markets" id="20" dimensionType="groupSizeEncoding">
             <field name="marketId"          id="1"  type="int32"/>
             <field name="symbol"            id="2"  type="Symbol"/>
