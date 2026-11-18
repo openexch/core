@@ -136,6 +136,8 @@ public final class CoreEngine {
     // journaling is on — it just writes nothing — so a node that cannot journal falls behind on records
     // without ever diverging on state.
     private MoneyJournalSink journal = MoneyJournalSink.NO_OP;
+    /** The order journal port: node-local transport, every event on every member (never decides state). */
+    private com.openexchange.core.domain.OrderJournalSink orderJournal = com.openexchange.core.domain.OrderJournalSink.NO_OP;
     private boolean journalEnabled = false;
     private long journalSeq = 0L;
     // Opening-balance epoch rows (userId, assetId, available+locked total), captured from PRE-event
@@ -158,6 +160,15 @@ public final class CoreEngine {
      * whether journaling happens, which is replicated state driven by {@link #CMD_SET_MONEY_JOURNAL}.
      * Safe to call at any time and on every node regardless of the cluster's journal setting.
      */
+    /** Wire the order journal (before launch on every member; there is no arming command, the journal is always on). */
+    public void setOrderJournalSink(final com.openexchange.core.domain.OrderJournalSink sink) {
+        this.orderJournal = sink == null ? com.openexchange.core.domain.OrderJournalSink.NO_OP : sink;
+    }
+
+    public com.openexchange.core.domain.OrderJournalSink orderJournal() {
+        return orderJournal;
+    }
+
     public void setMoneyJournalSink(MoneyJournalSink journalSink) {
         this.journal = journalSink == null ? MoneyJournalSink.NO_OP : journalSink;
     }
@@ -1240,6 +1251,19 @@ public final class CoreEngine {
     public boolean onMeTradeEntry(int templateId, long egressSeq, long journalSeq, long tradeId, int marketId, long takerLegId,
                                   long takerUserId, long makerLegId, long makerUserId, long price, long quantity, boolean takerIsBuy,
                                   long meTimestamp, long takerOmsOrderId, long makerOmsOrderId, long meEpoch, long timestamp) {
+        orders.meCause().trade(meEpoch, journalSeq, egressSeq, meTimestamp, takerOmsOrderId, makerOmsOrderId);
+        try {
+            return onMeTradeEntryCaused(templateId, egressSeq, journalSeq, tradeId, marketId, takerLegId, takerUserId,
+                    makerLegId, makerUserId, price, quantity, takerIsBuy, meTimestamp, takerOmsOrderId,
+                    makerOmsOrderId, meEpoch, timestamp);
+        } finally {
+            orders.meCause().clear();
+        }
+    }
+
+    private boolean onMeTradeEntryCaused(int templateId, long egressSeq, long journalSeq, long tradeId, int marketId, long takerLegId,
+                                  long takerUserId, long makerLegId, long makerUserId, long price, long quantity, boolean takerIsBuy,
+                                  long meTimestamp, long takerOmsOrderId, long makerOmsOrderId, long meEpoch, long timestamp) {
         if (!behaviorV3()) {
             orders.applyTrade(egressSeq, tradeId, marketId, takerLegId, takerUserId, makerLegId, makerUserId, price, quantity,
                     takerIsBuy, meTimestamp, takerOmsOrderId, makerOmsOrderId, meEpoch, timestamp);
@@ -1267,6 +1291,17 @@ public final class CoreEngine {
 
     /** MeJournalTerminal 63. Under v1/v2 the apply (meReason unused). */
     public boolean onMeTerminal(long egressSeq, long journalSeq, long legId, long userId, int marketId, int statusCode,
+                                int meRejectReason, long meTimestamp, long omsOrderId, long meEpoch, long timestamp) {
+        orders.meCause().record(meEpoch, journalSeq, egressSeq, meTimestamp);
+        try {
+            return onMeTerminalCaused(egressSeq, journalSeq, legId, userId, marketId, statusCode, meRejectReason,
+                    meTimestamp, omsOrderId, meEpoch, timestamp);
+        } finally {
+            orders.meCause().clear();
+        }
+    }
+
+    private boolean onMeTerminalCaused(long egressSeq, long journalSeq, long legId, long userId, int marketId, int statusCode,
                                 int meRejectReason, long meTimestamp, long omsOrderId, long meEpoch, long timestamp) {
         if (!behaviorV3()) {
             orders.applyTerminal(egressSeq, legId, userId, marketId, statusCode, meTimestamp, omsOrderId, meEpoch, timestamp);
@@ -1296,6 +1331,20 @@ public final class CoreEngine {
                                long omsOrderId, long oldOrderId, long price, long quantity, long budget, int marketId,
                                int commandKind, int result, long legId, int reason, boolean oldCancelled, long meTimestamp,
                                long meEpoch, long timestamp) {
+        orders.meCause().record(meEpoch, journalSeq, egressSeq, meTimestamp);
+        try {
+            return onMeOutcomeCaused(egressSeq, journalSeq, commandIdHigh, commandIdLow, userId, omsOrderId,
+                    oldOrderId, price, quantity, budget, marketId, commandKind, result, legId, reason, oldCancelled,
+                    meTimestamp, meEpoch, timestamp);
+        } finally {
+            orders.meCause().clear();
+        }
+    }
+
+    private boolean onMeOutcomeCaused(long egressSeq, long journalSeq, long commandIdHigh, long commandIdLow, long userId,
+                               long omsOrderId, long oldOrderId, long price, long quantity, long budget, int marketId,
+                               int commandKind, int result, long legId, int reason, boolean oldCancelled, long meTimestamp,
+                               long meEpoch, long timestamp) {
         if (!behaviorV3()) {
             orders.applyOutcome(egressSeq, commandIdHigh, commandIdLow, userId, omsOrderId, oldOrderId, price, quantity, budget,
                     marketId, commandKind, result, legId, reason, meTimestamp, meEpoch, timestamp);
@@ -1311,6 +1360,15 @@ public final class CoreEngine {
      * then the tables; under v1/v2 the apply of the fields it knows.
      */
     public boolean onMeOutcome(final MeOutcomeView v, final long timestamp) {
+        orders.meCause().record(v.meEpoch, v.journalSeq, v.egressSeq, v.meTimestamp);
+        try {
+            return onMeOutcomeViewCaused(v, timestamp);
+        } finally {
+            orders.meCause().clear();
+        }
+    }
+
+    private boolean onMeOutcomeViewCaused(final MeOutcomeView v, final long timestamp) {
         if (!behaviorV3()) {
             orders.applyOutcome(v.egressSeq, v.commandIdHigh, v.commandIdLow, v.userId, v.omsOrderId, v.oldOrderId, v.price,
                     v.quantity, v.budget, v.marketId, v.commandKind, v.result, v.orderId, v.reason, v.meTimestamp, v.meEpoch,

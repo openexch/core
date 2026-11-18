@@ -115,6 +115,8 @@ public final class OrderEngine {
     private final OrderStore orders = new OrderStore();
     private final RequestTable requests = new RequestTable();
     /** The newest order events for RequestOrderEvents (replicated, snapshotted). Capacity follows the limits record. */
+    /** The ME cause of the events emitted by the apply in progress; zeros outside an ME apply. */
+    private final MeCause meCause = new MeCause();
     private final OrderEventRing eventRing = new OrderEventRing(
             com.openexchange.core.application.engine.config.CoreLimits.DEFAULT_ORDER_EVENT_RING_CAPACITY);
     private final MarketRisk[] markets = new MarketRisk[UserRisk.MARKET_SLOTS];
@@ -724,8 +726,17 @@ public final class OrderEngine {
                               final long now, final int meReason) {
         final long position = ledger.getLogPosition();
         eventRing.append(eventSeq, position, o, kind, reason, lastPrice, lastQty, tradeId, holdRemaining, now, meReason);
+        final MeCause c = meCause;
+        ledger.orderJournal().onOrderEvent(eventSeq, ledger.recordedGenesisId(), position, o, kind, reason, lastPrice, lastQty,
+                tradeId, holdRemaining, now, meReason, c.liquidity(o.orderId, kind == EventKind.FILL && tradeId > 0),
+                c.meEpoch(), c.meJournalSeq(), c.meLogPosition(), c.meTimestampMs());
         ledger.eventSink().onOrderEvent(eventSeq, position, o, kind, reason, lastPrice, lastQty, tradeId, holdRemaining, now,
                 meReason);
+    }
+
+    /** The ME record being applied (set and cleared by the engine around each trade, terminal and outcome apply). */
+    public MeCause meCause() {
+        return meCause;
     }
 
     /** D9b: the pending ME reason, once. */

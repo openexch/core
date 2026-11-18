@@ -47,6 +47,14 @@ public final class InfrastructureConstants {
     /** Aeron IPC channel the money journal is published on. */
     public static final String MONEY_JOURNAL_CHANNEL = "aeron:ipc?term-length=4m";
 
+    // ==================== ORDER JOURNAL ====================
+    // One record per order event (order-journal-schema.xml, schema id 5), on from genesis on every member, recorded
+    // by the member's own archive next to the consensus log. The channel's term length is the setting
+    // CORE_ORDER_JOURNAL_TERM_LENGTH (OrderJournalSettings); the stream id is a format constant.
+
+    /** Aeron stream id the order journal is recorded and replayed on (node-local IPC). */
+    public static final int ORDER_JOURNAL_STREAM_ID = 4102;
+
     // ==================== BALANCE FEED SIDE-CHANNEL ====================
     // The conflated latest-value BalanceUpdate feed (dark unless BALANCE_FEED_CHANNEL names a
     // channel): a plain Aeron publication fed by its own agent thread, so live balance fanout

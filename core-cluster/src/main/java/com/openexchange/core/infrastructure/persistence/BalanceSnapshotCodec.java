@@ -895,6 +895,24 @@ public final class BalanceSnapshotCodec {
         return pos[0];
     }
 
+    /** Offset of {@code eventSeq} in the payload: after the tag and five scalars (layout above). */
+    public static final int EVENT_SEQ_OFFSET = 6 * 8;
+
+    /**
+     * The image's eventSeq without decoding it: the restore-side order-journal rule reads it from a loaded, digest-checked
+     * payload before the engine is touched. Refuses a layout this build does not read.
+     */
+    public static long peekEventSeq(final DirectBuffer src, final int payloadOffset, final int payloadLength) {
+        if (payloadLength < EVENT_SEQ_OFFSET + 8) {
+            throw new IllegalStateException("balance snapshot payload too short for its eventSeq: " + payloadLength);
+        }
+        final long tag = src.getLong(payloadOffset);
+        if (tag != LAYOUT_V6_TAG) {
+            throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only v6");
+        }
+        return src.getLong(payloadOffset + EVENT_SEQ_OFFSET);
+    }
+
     /**
      * Decode a v4 payload into {@code engine}, restoring its accounts, holds and scalars. The engine is
      * assumed fresh (empty); recovery constructs a new engine and restores into it. Refuses, with

@@ -270,6 +270,64 @@ public final class CoreClusteredService implements ClusteredService {
         applier.setMoneyJournalSink(journalSink);
     }
 
+    /** Test seam only (a negative control): the snapshot waits up to this many ms for the order journal. */
+    static volatile long ncSnapshotWaitsOnOrderJournalMs;
+
+    /** This member's order journal and its settings; null in in-process tests that never wire one. */
+    private com.openexchange.core.infrastructure.journal.OrderJournal orderJournal;
+    private com.openexchange.core.infrastructure.journal.OrderJournalSettings orderJournalSettings;
+
+    /**
+     * Wire this member's order journal before launch. There is no arming command: the journal is on from genesis on
+     * every member (its sequence is the engine's eventSeq), and wiring it decides no replicated state.
+     */
+    public void setOrderJournal(final com.openexchange.core.infrastructure.journal.OrderJournal journal,
+                                final com.openexchange.core.infrastructure.journal.OrderJournalSettings settings) {
+        this.orderJournal = journal;
+        this.orderJournalSettings = settings;
+        applier.setOrderJournalSink(journal);
+    }
+
+    /** The restore-side order-journal rule over this member's archive; holes land in the member's journal. */
+    private OrderJournalRestoreRule orderJournalRule() {
+        final com.openexchange.core.infrastructure.journal.OrderJournal j = orderJournal;
+        if (j == null) {
+            return OrderJournalRestoreRule.withoutJournal();
+        }
+        return new OrderJournalRestoreRule(org.agrona.concurrent.SystemNanoClock.INSTANCE,
+                snapshotModeSettings.loadTimeoutMs(), new OrderJournalRestoreRule.Holes() {
+                    @Override
+                    public void declare(final long fromExclusive, final long toInclusive) {
+                        j.declareHole(fromExclusive, toInclusive);
+                    }
+
+                    @Override
+                    public void unreadable(final long restoredSeq) {
+                        j.declareUnknown(restoredSeq);
+                    }
+                });
+    }
+
+    /**
+     * After the member's own full image: the local journal against the restored eventSeq, through a client of this
+     * member's archive, before the log replay emits anything.
+     */
+    private void checkOrderJournalAfterFullRestore() {
+        if (cluster == null || orderJournal == null || engine.getEventSeq() <= 0) {
+            return;
+        }
+        io.aeron.archive.client.AeronArchive archive = null;
+        try {
+            archive = io.aeron.archive.client.AeronArchive.connect(cluster.context().archiveContext().clone());
+            orderJournalRule().afterRestore(archive.context().aeron(), archive, engine.recordedGenesisId(),
+                    engine.getEventSeq(), "full image");
+        } catch (final RuntimeException unreadable) {
+            orderJournalRule().unreadable(engine.getEventSeq(), "full image", unreadable.toString());
+        } finally {
+            org.agrona.CloseHelper.quietClose(archive);
+        }
+    }
+
     /**
      * This node's balance-feed conflation store, or null when the feed is off (the default). Written
      * by this service thread on every LIVE balance update — on followers too, so the store is always
@@ -525,6 +583,28 @@ public final class CoreClusteredService implements ClusteredService {
                 .gauge("core_journal_seq", "Money journal sequence (last entry written)", engine::getJournalSeq)
                 .gauge("core_money_journal_enabled", "1 if the money journal is armed on this ledger, else 0",
                         () -> engine.isMoneyJournalEnabled() ? 1 : 0)
+                .gauge("core_order_journal_seq", "Order journal sequence (the engine's eventSeq)", engine::getEventSeq)
+                .gauge("core_order_journal_recorded_seq", "Newest order journal record written to this member's archive",
+                        () -> orderJournal == null ? -1 : orderJournal.recordedSeq())
+                .gauge("core_order_journal_ring_used_bytes", "Bytes waiting in the order journal ring",
+                        () -> orderJournal == null ? -1 : orderJournal.ringUsedBytes())
+                .counter("core_order_journal_backpressure_events", "Order events that found the journal ring full",
+                        () -> orderJournal == null ? 0 : orderJournal.backpressureEvents())
+                .counter("core_order_journal_connect_failures", "Failed connects of the order journal writer to the archive",
+                        () -> orderJournal == null ? 0 : orderJournal.connectFailures())
+                .counter("core_order_journal_holes_total", "Restores that found this member's order journal behind the"
+                        + " restored state (a hole this member cannot regenerate)",
+                        () -> orderJournal == null ? 0 : orderJournal.holesTotal())
+                .counter("core_order_journal_tail_unreadable_total", "Restores after which this member's order journal"
+                        + " tail could not be read (no hole declared, none excluded; shown as unknown on /health)",
+                        () -> orderJournal == null ? 0 : orderJournal.tailUnreadableTotal())
+                .counter("core_order_journal_publication_lost_total", "Order journal publications found closed under"
+                        + " the writer (dropped and reconnected; the record stays in the ring)",
+                        () -> orderJournal == null ? 0 : orderJournal.publicationLosses())
+                .gauge("core_order_journal_lag_at_snapshot_events", "Order events not yet recorded at the last snapshot",
+                        () -> orderJournal == null ? -1 : orderJournal.lagAtSnapshotEvents())
+                .gauge("core_archive_replays_active", "Replays active on this member's archive (the replay-count probe)",
+                        this::archiveReplaysActive)
                 .counter("core_settle_faults_total",
                         "Settle legs that could not draw fully from their order hold (MUST be alerted on)",
                         engine::getSettleFaultCount)
@@ -918,13 +998,55 @@ public final class CoreClusteredService implements ClusteredService {
                 port = 9700 + nodeId;
             }
             // /health and /ready end with version= and build= from this engine jar's manifest (telemetry only)
-            nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(readiness, metricsBody()::render)
+            nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(this::probe, metricsBody()::render)
                     .withBuild(com.openexchange.cluster.BuildInfo.of(CoreClusteredService.class));
             nodeEndpoint.start(port);
         } catch (Exception e) {
             // A probe endpoint must never be the reason the ledger does not start.
             System.err.println("NODE: failed to start probe endpoint: " + e.getMessage());
         }
+    }
+
+    /**
+     * The probe the endpoint serves: the kit's readiness, closed while the order journal's ring alarm holds (a member
+     * whose archive stopped taking the journal must not read ready), and the journal's settings and hole ranges in the
+     * detail line on every answer.
+     */
+    com.openexchange.cluster.NodeReadiness.Probe probe() {
+        final com.openexchange.cluster.NodeReadiness.Probe base = readiness.probe();
+        final com.openexchange.core.infrastructure.journal.OrderJournal j = orderJournal;
+        if (j == null) {
+            return base;
+        }
+        final boolean stalled = j.alarmed(System.nanoTime());
+        final String journal = " order-journal: holes=" + j.holeRanges() + " recordedSeq=" + j.recordedSeq()
+                + " ringUsedBytes=" + j.ringUsedBytes() + " settings: " + orderJournalSettings;
+        if (stalled) {
+            return new com.openexchange.cluster.NodeReadiness.Probe(base.live(), false,
+                    "order-journal-stalled (ring above the alarm bound) " + base.detail() + journal);
+        }
+        return new com.openexchange.cluster.NodeReadiness.Probe(base.live(), base.ready(), base.detail() + journal);
+    }
+
+    /**
+     * Replays this member's archive is serving to the configured reader replay stream: the sender-position counters
+     * (type 2) of that stream on this member's driver. -1 when no stream is configured.
+     */
+    long archiveReplaysActive() {
+        final com.openexchange.core.infrastructure.journal.OrderJournalSettings settings = orderJournalSettings;
+        final Cluster c = cluster;
+        if (settings == null || settings.replayProbeStream() == 0 || c == null) {
+            return -1L;
+        }
+        final int stream = settings.replayProbeStream();
+        final long[] n = {0};
+        c.aeron().countersReader().forEach((counterId, typeId, keyBuffer, label) -> {
+            if (typeId == io.aeron.AeronCounters.DRIVER_SENDER_POSITION_TYPE_ID
+                    && keyBuffer.getInt(io.aeron.driver.status.StreamCounter.STREAM_ID_OFFSET) == stream) {
+                n[0]++;
+            }
+        });
+        return n[0];
     }
 
     /**
@@ -952,6 +1074,9 @@ public final class CoreClusteredService implements ClusteredService {
         }
         if (!consensusModuleInSnapshot()) {
             readyOutsideSnapshot = readiness.ready();
+        }
+        if (orderJournal != null) {
+            orderJournal.alarmed(nowNs);
         }
         shadowProducer.onBackgroundWork(nowNs, cluster.logPosition(), cluster.memberId());
         if (pendingOutsideCallbackPosition >= 0) {
@@ -1329,6 +1454,16 @@ public final class CoreClusteredService implements ClusteredService {
 
     private void applyOnTakeSnapshot(ExclusivePublication snapshotPublication) {
         final long startNs = System.nanoTime();
+        if (orderJournal != null) {
+            orderJournal.sampleLagAtSnapshot(); // two volatile reads: the snapshot never waits on the order journal
+            if (ncSnapshotWaitsOnOrderJournalMs > 0) {
+                // negative control only: a test build whose snapshot waits for the journal to be recorded
+                final long until = System.nanoTime() + ncSnapshotWaitsOnOrderJournalMs * 1_000_000L;
+                while (orderJournal.recordedSeq() < orderJournal.appendedSeq() && System.nanoTime() - until < 0) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
+                }
+            }
+        }
         final long actionPosition = cluster.logPosition();
         skipped(com.openexchange.cluster.log.FrameKind.CLUSTER_ACTION, actionPosition); // closes a window past P_s
         // Negative control only: windowClauseOff ignores the window (the 3.3 window clause off)
@@ -1686,6 +1821,7 @@ public final class CoreClusteredService implements ClusteredService {
             nodeMetrics.stampRestoredSnapshot(cluster == null ? -1L : cluster.logPosition(),
                     snapshotStateHash(image, imageLength));
             snapshotModeCounters.set(SnapshotModeCounters.C.RESTORE_PATH, SnapshotModeCounters.PATH_FULL);
+            checkOrderJournalAfterFullRestore();
             final BalanceSnapshotCodec.Decoded decoded = applier.lastRestored();
             System.out.println("[SNAPSHOT] restored orders=" + engine.orders().orders().size() + " accounts=" + decoded.accountCount
                     + " holds=" + decoded.holdCount + " lastAppliedTradeId=" + decoded.lastAppliedTradeId
@@ -1750,7 +1886,7 @@ public final class CoreClusteredService implements ClusteredService {
                     System.err.println(text);
                     failFast.run();
                 },
-                startupPull());
+                startupPull()).orderJournal(orderJournalRule());
         final ShadowRestore.Outcome outcome;
         try {
             outcome = restore.run(stub);
