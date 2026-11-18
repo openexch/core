@@ -98,6 +98,23 @@ Settings renamed from earlier releases (for example `ASSETS_ROLE` to `CORE_ROLE`
 
 Ports are `CLUSTER_PORT_BASE + node id * CLUSTER_PORT_STRIDE + offset`, with offsets 1 archive control, 2 client ingress, 3 member, 4 log, 5 catchup transfer. With the defaults, clients connect to port 9302.
 
+### Order journal
+
+Every member records one 216-byte record per order event (schema id 5, `core-common/src/main/resources/sbe/order-journal-schema.xml`) on stream 4102 in its own archive: journalSeq equals the event sequence, the epoch is the recorded CoreConfig genesis id, and each fill names its ME record. History readers follow it over the archive; the engine writes it after the event is applied, through a ring and a writer agent, so the service thread never waits on the archive while the ring has room.
+
+| variable | default | meaning |
+|---|---|---|
+| `CORE_ORDER_JOURNAL_RING_BYTES` | `16777216` | the ring between the service thread and the writer (at least 2048) |
+| `CORE_ORDER_JOURNAL_TERM_LENGTH` | `4m` | term length of the journal publication |
+| `CORE_ORDER_JOURNAL_RING_ALARM_PCT`, `CORE_ORDER_JOURNAL_RING_ALARM_MS` | `50`, `5000` | readiness closes while, for the ALARM_MS, the ring stays above PCT full, or records wait and the archive-confirmed `recordedSeq` does not move. `PCT=100` switches off only the fill alarm |
+| `CORE_ORDER_JOURNAL_STALL_LOG_MS`, `CORE_ORDER_JOURNAL_WRITER_IDLE_MAX_US` | `1000`, `1000` | stall log interval; the writer's longest idle sleep |
+| `CORE_ORDER_JOURNAL_CLOSE_DRAIN_MS` | `2000` | a graceful stop drains the ring for at most this long; a kill does not drain |
+| `CORE_ARCHIVE_MAX_CONCURRENT_REPLAYS` | `10` | the member archive's replay cap |
+| `CORE_ARCHIVE_CLUSTER_RESERVED_REPLAYS` | `2` | replays kept free for cluster catch-up; readers' budget is the cap minus this (shown on `/health`). The archive has one cap for all clients, so this is a budget readers hold to, not a slot the archive sets aside |
+| `CORE_ARCHIVE_REPLAY_PROBE_STREAM` | `0` | the replay stream whose open replays `core_archive_replays_active` counts (0: the gauge reads -1) |
+
+Restore: a SKIP whose image event sequence the local journal does not hold is abandoned for a path that replays the log; when none exists the SKIP is taken and the hole is declared, because the money state is correct. Holes are declared as `(D,S]` on `/health` and in `core_order_journal_holes_total`; an unreadable tail shows `unknown(,S]` and counts in `core_order_journal_tail_unreadable_total`. Hole ranges are kept in memory only, so after another restart at the same snapshot `/health` can read `holes=none` while the gap remains in the archive: a reader finds it by density. When a leader's archive stalls the leader stays leader and order entry stops.
+
 ### Shadow pulls and the purge anchor
 
 A member in `SNAPSHOT_MODE=shadow` can copy shadows from other archives (a peer member's, the replica's) with the shadow puller. It talks to a source only through the source's archive control channel and verifies every copy locally before it counts. Details in cluster-kit's `docs/shadow.md` ("Pulling shadows").

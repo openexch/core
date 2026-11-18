@@ -89,6 +89,11 @@ public final class CoreLogApplier implements ShadowEngine {
         engine.setMoneyJournalSink(sink);
     }
 
+    /** The order journal port: every order event on every member (node-local transport, decides nothing). */
+    public void setOrderJournalSink(final com.openexchange.core.domain.OrderJournalSink sink) {
+        engine.setOrderJournalSink(sink);
+    }
+
     /** Leader-local transport effects of RegisterSession; {@code null} installs {@code TransportHooks.NONE}. */
     public void setTransportHooks(final CoreSbeDemuxer.TransportHooks hooks) {
         demuxer.setTransportHooks(hooks);

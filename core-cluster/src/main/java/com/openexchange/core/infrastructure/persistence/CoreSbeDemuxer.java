@@ -815,9 +815,11 @@ public final class CoreSbeDemuxer {
         meJournalTradeBatchDecoder.wrapAndApplyHeader(frame, 0, headerDecoder);
         applying = true;
         for (final MeJournalTradeBatchDecoder.TradesDecoder t : meJournalTradeBatchDecoder.trades()) {
-            engine.orders().applyTrade(t.egressSeq(), t.tradeId(), t.marketId(), t.takerOrderId(), t.takerUserId(), t.makerOrderId(),
-                    t.makerUserId(), t.price(), t.quantity(), t.takerIsBuyRaw() == BoolFlag.TRUE.value(), t.meTimestamp(),
-                    t.takerOmsOrderId(), t.makerOmsOrderId(), t.meEpoch(), timestamp);
+            // below v3 the engine's entry is exactly the order engine's apply, plus the per-entry ME cause of the journal
+            engine.onMeTradeEntry(MeJournalTradeBatchDecoder.TEMPLATE_ID, t.egressSeq(), t.journalSeq(), t.tradeId(),
+                    t.marketId(), t.takerOrderId(), t.takerUserId(), t.makerOrderId(), t.makerUserId(), t.price(), t.quantity(),
+                    t.takerIsBuyRaw() == BoolFlag.TRUE.value(), t.meTimestamp(), t.takerOmsOrderId(), t.makerOmsOrderId(),
+                    t.meEpoch(), timestamp);
         }
     }
 

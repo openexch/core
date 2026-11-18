@@ -287,8 +287,25 @@ final class ShadowRestore {
     private final Consumer<String> watchdogHalt;
     private final StartupPull pull;
     private final NanoClock clock = SystemNanoClock.INSTANCE;
+    /** The restore-side order-journal rule (SKIP refusal, hole declaration on EQUAL and TAIL). */
+    private OrderJournalRestoreRule orderJournalRule;
+
+    /** Wire the order-journal rule; without it the rule still runs and declares holes nowhere but the log. */
+    ShadowRestore orderJournal(final OrderJournalRestoreRule rule) {
+        this.orderJournalRule = rule;
+        return this;
+    }
+
+    private OrderJournalRestoreRule orderJournalRule() {
+        if (orderJournalRule == null) {
+            orderJournalRule = new OrderJournalRestoreRule(clock, settings.loadTimeoutMs(), OrderJournalRestoreRule.Holes.NONE);
+        }
+        return orderJournalRule;
+    }
 
     private boolean restoreAttempted;
+    /** True while the SKIP the order journal refused is taken because no other path replays the log. */
+    private boolean skipOverOrderJournal;
     private volatile long tailAt = -1;
 
     /**
@@ -397,10 +414,11 @@ final class ShadowRestore {
                     + " logRecording=" + logRecordingId + " logStart=" + logStart + " scan_ms="
                     + TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - scan0));
 
-            Selection sel = select(scan, pCm, logStart, terms, local, loader, aeron, archive);
+            Selection sel = select(scan, pCm, logStart, terms, local, loader, aeron, archive, stub.genesisId());
 
             // 3b. PULL (only with sources configured): one bounded startup pull, then one repeat of rules 1-3
             String pulled = "disabled: " + ShadowPullSettings.SOURCES + " empty";
+            Loaded journalBehindSkip = sel.journalBehindSkip();
             if (sel.chosen() == null && pull.settings().enabled()) {
                 final ShadowPuller.Report report = pull(aeron, pCm, logStart, stub.genesisId());
                 pulled = report.text();
@@ -412,7 +430,10 @@ final class ShadowRestore {
                             + " shadow recording(s), usable=" + again.usable().size() + " errors=" + again.errors()
                             + " scan_ms=" + TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - scan1)
                             + "; rules 1-3 once more");
-                    sel = select(again, pCm, logStart, terms, local, loader, aeron, archive);
+                    sel = select(again, pCm, logStart, terms, local, loader, aeron, archive, stub.genesisId());
+                    if (sel.journalBehindSkip() != null) {
+                        journalBehindSkip = sel.journalBehindSkip();
+                    }
                 }
             }
 
@@ -429,6 +450,20 @@ final class ShadowRestore {
             if (precondition == null) {
                 return virtualGenesis(stub, rangeRecording(terms, 0, pCm), aeron, archive, startNs);
             }
+            // 4b. the order journal was the only reason the SKIP was abandoned and nothing replays the log: the money
+            // state of the SKIP is correct, so take it and declare the hole (the member is not fenced for its journal)
+            if (journalBehindSkip != null && !faults.skipSafeOff) {
+                System.out.println("[shadow restore] SKIP P_s=" + journalBehindSkip.shadow().logPosition()
+                        + " taken over an order journal behind it: no path replays the log (TAIL " + (sel.tailNotes()
+                        .isEmpty() ? "none" : String.join(" ", sel.tailNotes())) + ", virtual genesis refused: "
+                        + precondition + ", pull: " + pulled + ")");
+                skipOverOrderJournal = true;
+                try {
+                    return restoreFrom(journalBehindSkip, Path.SKIP, stub, logRecordingId, aeron, archive, startNs);
+                } finally {
+                    skipOverOrderJournal = false;
+                }
+            }
             throw new Halt("FATAL shadow restore: stub at P_cm=" + pCm + " and no restore path: shadows usable="
                     + scan.usable().size() + " (EQUAL " + sel.equal() + ", SKIP " + sel.skip() + ", TAIL "
                     + (sel.tailNotes().isEmpty() ? "none" : String.join(" ", sel.tailNotes())) + " above log start "
@@ -443,13 +478,14 @@ final class ShadowRestore {
     }
 
     /** What rules 1-3 chose over one scan, and why each said no. */
-    private record Selection(Loaded chosen, Path path, String equal, String skip, List<String> tailNotes) {
+    private record Selection(Loaded chosen, Path path, String equal, String skip, List<String> tailNotes,
+                             Loaded journalBehindSkip) {
     }
 
     /** Rules 1-3 (EQUAL, SKIP, TAIL downwards) over one scan; the first candidate that passes every check. */
     private Selection select(final ShadowCatalog.Scan scan, final long pCm, final long logStart, final List<Term> terms,
                              final ShadowIdentity.LocalIdentity local, final ShadowImageLoader loader,
-                             final Aeron aeron, final AeronArchive archive) {
+                             final Aeron aeron, final AeronArchive archive, final long genesisId) {
         // 1. EQUAL
         String equal = "none";
         final ShadowCatalog.Answer eq = scan.equalAt(pCm);
@@ -466,6 +502,7 @@ final class ShadowRestore {
 
         // 2. SKIP
         String skip = "none";
+        Loaded journalBehindSkip = null;
         if (chosen == null) {
             final ShadowCatalog.Answer sk = scan.newestAtOrAbove(pCm + 1);
             if (sk.kind() == ShadowCatalog.Answer.Kind.CONFLICT) {
@@ -485,6 +522,16 @@ final class ShadowRestore {
                     chosen = check(loader, sk.shadow(), local, "SKIP");
                     skip = chosen == null ? "refused" : "found";
                     path = chosen == null ? null : Path.SKIP;
+                    // the order journal's rule needs the image's eventSeq, so it runs after the load (the header does
+                    // not carry it); an abandoned SKIP falls to the paths that replay the log
+                    if (chosen != null && !faults.skipSafeOff && !orderJournalRule().skipSafe(aeron, archive, genesisId,
+                            imageEventSeq(chosen), sk.shadow().logPosition())) {
+                        counters.increment(SnapshotModeCounters.C.SKIP_UNSAFE_TOTAL);
+                        journalBehindSkip = chosen; // taken only when no path that replays the log exists
+                        chosen = null;
+                        path = null;
+                        skip = "order-journal-behind";
+                    }
                 }
             }
         }
@@ -533,7 +580,7 @@ final class ShadowRestore {
                 break;
             }
         }
-        return new Selection(chosen, path, equal, skip, tailNotes);
+        return new Selection(chosen, path, equal, skip, tailNotes, chosen == null ? journalBehindSkip : null);
     }
 
     /**
@@ -630,6 +677,12 @@ final class ShadowRestore {
         return new Loaded(s, entry, r.loaded());
     }
 
+    /** The loaded image's eventSeq, read from its payload without decoding the rest. */
+    static long imageEventSeq(final Loaded l) {
+        final int at = com.openexchange.cluster.SnapshotEnvelope.payloadOffset();
+        return BalanceSnapshotCodec.peekEventSeq(l.image().payload(), at, l.image().length() - at);
+    }
+
     /** 8.1: {@code !S.journalEnabled || localJournalDurableSeq >= S.journalSeq}; an unreadable journal is not safe. */
     static boolean skipSafe(final ShadowHeader h, final MoneyJournalTail.Result localJournal) {
         if (!h.journalEnabledFlag()) {
@@ -691,6 +744,12 @@ final class ShadowRestore {
                     + h.clusterTime());
         }
         final long pCm = stub.logPosition();
+        if (path != Path.SKIP || skipOverOrderJournal) {
+            // EQUAL, TAIL and a SKIP taken over the journal: the journal against the restored state, before the log
+            // replay emits anything
+            orderJournalRule().afterRestore(aeron, archive, stub.genesisId(), applier.engine().getEventSeq(),
+                    "shadow " + path);
+        }
         SkipWindow window = null;
         long term = stub.leadershipTermId();
         switch (path) {

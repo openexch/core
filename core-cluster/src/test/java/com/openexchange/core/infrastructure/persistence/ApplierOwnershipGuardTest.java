@@ -43,6 +43,7 @@ public class ApplierOwnershipGuardTest {
     /** Read-only engine accesses the service may keep (metrics, logs, arming, the feed seed). */
     static final Set<String> ENGINE_ALLOWED = Set.of(
             "accountCount", "getLastAppliedTradeId", "getConsumePosition", "getJournalSeq", "isMoneyJournalEnabled",
+            "getEventSeq", "recordedGenesisId", // the order journal checks and gauges read the event sequence and genesis
             "getSettleFaultCount", "getSuppressedFeedReleaseCount", "getExhaustedHoldsReaped", "getSettleRejectCount",
             "getLastLogTime", "sessions().size", "gate().state", "deadlines().size", "deadlines().isEmpty",
             "forEachAccountByUserId", "orders().orders", "metricsView"); // The read-only metrics view

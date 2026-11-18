@@ -420,4 +420,24 @@ public final class ServiceProbe {
                 com.openexchange.cluster.shadow.SlowShadowWriters.slow(aeron, archive, producer, selfCheck, term, clock,
                         c, o, r, seq, pos, counters, holdMs));
     }
+
+    /** The probe the node endpoint serves (readiness with the order journal's alarm and detail line). */
+    public static com.openexchange.cluster.NodeReadiness.Probe probe(final CoreClusteredService service) {
+        return service.probe();
+    }
+
+    /** Test seam: the restore-side order-journal hole is not declared (the detection's negative control). */
+    public static void orderJournalDetectionOff(final boolean off) {
+        OrderJournalRestoreRule.detectionOff = off;
+    }
+
+    /** Test seam: the order journal's tail reader counts recordings of every genesis (the epoch filter's control). */
+    public static void orderJournalEpochFilterOff(final boolean off) {
+        OrderJournalRestoreRule.epochFilterOff = off;
+    }
+
+    /** Test seam: the snapshot waits up to {@code ms} for the order journal to be recorded (a negative control). */
+    public static void snapshotWaitsOnOrderJournal(final long ms) {
+        CoreClusteredService.ncSnapshotWaitsOnOrderJournalMs = ms;
+    }
 }

@@ -150,7 +150,10 @@ public final class ClusterConfig {
                 .segmentFileLength(
                         com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment.fromEnv().lengthInt())
                 .maxConcurrentRecordings(10)
-                .maxConcurrentReplays(10);
+                // CORE_ARCHIVE_MAX_CONCURRENT_REPLAYS (default 10): readers of the journals replay from this archive.
+                // The default here; the node applies its parsed setting with #archiveReplayCap (one parse per node).
+                .maxConcurrentReplays(com.openexchange.core.infrastructure.journal.OrderJournalSettings.defaults()
+                        .maxConcurrentReplays());
 
         final AeronArchive.Context aeronArchiveContext = new AeronArchive.Context()
                 .lock(NoOpLock.INSTANCE)
@@ -249,6 +252,14 @@ public final class ClusterConfig {
             final int portBase,
             final ClusteredService clusteredService) {
         return create(nodeId, hostnames, hostnames, portBase, clusteredService);
+    }
+
+    /**
+     * The archive's replay cap ({@code CORE_ARCHIVE_MAX_CONCURRENT_REPLAYS}) from the node's parsed order journal settings:
+     * the same instance the order journal and {@code /health} report, so the cap and its report cannot disagree.
+     */
+    public void archiveReplayCap(final com.openexchange.core.infrastructure.journal.OrderJournalSettings settings) {
+        this.archiveContext.maxConcurrentReplays(settings.maxConcurrentReplays());
     }
 
     public void errorHandler(final ErrorHandler errorHandler) {
