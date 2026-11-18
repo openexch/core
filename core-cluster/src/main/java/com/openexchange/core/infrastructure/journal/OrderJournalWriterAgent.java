@@ -104,7 +104,7 @@ public final class OrderJournalWriterAgent implements Agent {
 
     @Override
     public int doWork() {
-        journal.alarmed(System.nanoTime());
+        journal.sampleAlarm(System.nanoTime());
         if (publication == null) {
             if (ring.size() == 0) {
                 return 0;
@@ -164,7 +164,7 @@ public final class OrderJournalWriterAgent implements Agent {
         if (result == Publication.CLOSED || result == Publication.MAX_POSITION_EXCEEDED) {
             lostReason = result == Publication.CLOSED ? "closed" : "max position exceeded";
         } else {
-            journal.alarmed(System.nanoTime()); // back pressured or not connected: the record stays in the ring
+            journal.sampleAlarm(System.nanoTime()); // back pressured or not connected: the record stays in the ring
         }
         return ControlledMessageHandler.Action.ABORT;
     }

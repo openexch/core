@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntUnaryOperator;
 
 /**
@@ -82,12 +83,16 @@ public final class OrderJournal implements OrderJournalSink {
     private final List<String> holes = new ArrayList<>();
     private volatile boolean closed;
 
-    // the alarm windows: sampled from several threads without a lock; a race moves a window start by one sample
-    private volatile long aboveSinceNs = -1L;
-    private volatile long stuckSinceNs = -1L;
-    private volatile long stuckAtRecordedSeq = -1L;
+    // the alarm windows, sampled from several threads one sample at a time (guarded by sampling)
+    private final ReentrantLock sampling = new ReentrantLock();
+    private long aboveSinceNs = -1L;
+    private long stuckSinceNs = -1L;
+    private long stuckAtRecordedSeq = -1L;
+    private long lastSampleNs = Long.MIN_VALUE;
     /** Test seam only (the control of the no-progress alarm): the fill bound alone decides. */
     volatile boolean progressAlarmOff;
+    /** Test seam only: runs inside a sample, after the condition was read and before the windows are written. */
+    Runnable afterObservation;
 
     public OrderJournal(final OrderJournalSettings settings) {
         this.ringCapacity = settings.ringBytes();
@@ -183,43 +188,76 @@ public final class OrderJournal implements OrderJournalSink {
      * True when, for {@code CORE_ORDER_JOURNAL_RING_ALARM_MS}, either the ring has stayed above
      * {@code CORE_ORDER_JOURNAL_RING_ALARM_PCT} of its capacity, or records were waiting (appended, not yet recorded by
      * the archive) while the recorded sequence did not move. The second catches a writer that cannot connect, a dead
-     * writer and a stalled archive at any flow, long before the ring fills. Sampled by every caller (the probe, the
-     * writer, the service thread's background work), without a lock; each window starts at the first sample in its
-     * state and ends at the first one out of it.
+     * writer and a stalled archive at any flow, long before the ring fills. Each window starts at the first sample in
+     * its state and ends at the first one out of it.
+     *
+     * <p>The probe's call: it takes a sample of its own, waiting for a sample in progress on another thread. Samples
+     * are taken one at a time, each reads the condition and writes the windows together, and a sample's time is never
+     * earlier than the last one's: a sampler that read the condition clear and then lost the CPU cannot erase a window
+     * that matured meanwhile, and a sample stamped late cannot shorten one. Once the alarm reads true it keeps reading
+     * true while the condition holds.</p>
      */
     public boolean alarmed(final long nowNs) {
-        final boolean filled = fillAlarmed(nowNs);
-        final boolean stuck = progressAlarmed(nowNs);
+        sampling.lock();
+        try {
+            return sample(nowNs);
+        } finally {
+            sampling.unlock();
+        }
+    }
+
+    /**
+     * A sample from the service thread's background work or the writer: opens and closes the windows between probes,
+     * and never waits (a sample already in progress on another thread stands for this one).
+     */
+    public void sampleAlarm(final long nowNs) {
+        if (sampling.tryLock()) {
+            try {
+                sample(nowNs);
+            } finally {
+                sampling.unlock();
+            }
+        }
+    }
+
+    private boolean sample(final long nowNs) {
+        final long now = Math.max(nowNs, lastSampleNs);
+        lastSampleNs = now;
+        final boolean filled = fillAlarmed(now);
+        final boolean stuck = progressAlarmed(now);
         return filled || stuck;
     }
 
     private boolean fillAlarmed(final long nowNs) {
         final boolean above = ringUsedBytes() * 100L > (long) alarmPct * ringCapacity;
+        if (afterObservation != null) {
+            afterObservation.run();
+        }
         if (!above) {
             aboveSinceNs = -1L;
             return false;
         }
-        long since = aboveSinceNs;
-        if (since < 0) {
-            since = nowNs;
-            aboveSinceNs = since;
+        if (aboveSinceNs < 0) {
+            aboveSinceNs = nowNs;
         }
-        return nowNs - since >= alarmNs;
+        return nowNs - aboveSinceNs >= alarmNs;
     }
 
     private boolean progressAlarmed(final long nowNs) {
         final long recorded = recordedSeq;
-        if (progressAlarmOff || appendedSeq <= recorded) {
+        final boolean waiting = !progressAlarmOff && appendedSeq > recorded;
+        if (afterObservation != null) {
+            afterObservation.run();
+        }
+        if (!waiting) {
             stuckSinceNs = -1L;
             return false;
         }
-        long since = stuckSinceNs;
-        if (since < 0 || stuckAtRecordedSeq != recorded) {
-            since = nowNs;
+        if (stuckSinceNs < 0 || stuckAtRecordedSeq != recorded) {
             stuckAtRecordedSeq = recorded;
-            stuckSinceNs = since;
+            stuckSinceNs = nowNs;
         }
-        return nowNs - since >= alarmNs;
+        return nowNs - stuckSinceNs >= alarmNs;
     }
 
     // ------------------------------------------------------------------ restore-side holes

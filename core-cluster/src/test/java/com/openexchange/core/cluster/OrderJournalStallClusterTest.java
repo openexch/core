@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.openexchange.core.cluster;
 
+import com.openexchange.cluster.NodeReadiness;
 import com.openexchange.core.infrastructure.InfrastructureConstants;
 import com.openexchange.core.infrastructure.generated.SessionClass;
 import com.openexchange.core.infrastructure.generated.TimeInForce;
@@ -113,6 +114,12 @@ public class OrderJournalStallClusterTest {
         }
     }
 
+    /** Readiness closed by the order journal's alarm (the probe names it first in its detail). */
+    static boolean journalAlarmClosed(final ShadowClusterRig.Member m) {
+        final NodeReadiness.Probe p = ServiceProbe.probe(m.service);
+        return !p.ready() && p.detail().startsWith("order-journal-stalled");
+    }
+
     private static void stallAndRelease(final ShadowClusterRig rig, final Wiring w, final Flow flow,
                                         final ShadowClusterRig.Member m, final long holdMs, final int offers,
                                         final int fillBytes, final String what) {
@@ -124,10 +131,14 @@ public class OrderJournalStallClusterTest {
         // 400 are more than it holds: the service thread blocks on the full ring
         flow.offer(offers);
         rig.await(() -> j.ringUsedBytes() > fillBytes, 30_000, () -> what + ": the ring never filled");
+        // the journal's own alarm, not any not-ready answer: under the burst the kit's readiness can close (apply
+        // lag above its bound) and reopen before the alarm window has run, and the hold below would then read ready
         try {
-            rig.await(() -> !ServiceProbe.probe(m.service).ready(), 3 * ALARM_MS + 2_000, () -> "");
-        } catch (final AssertionError stayedReady) {
+            rig.await(() -> journalAlarmClosed(m), 3 * ALARM_MS + 2_000, () -> "");
+        } catch (final AssertionError neverClosed) {
             assertNotReadyWhileBlocked(m);
+            throw new AssertionError(what + ": the order journal alarm never closed readiness: member " + m.id + " "
+                    + ServiceProbe.probe(m.service).detail());
         }
         final long notReadyMs = (System.nanoTime() - t0) / 1_000_000;
         final List<String> roles = new ArrayList<>();
@@ -144,9 +155,10 @@ public class OrderJournalStallClusterTest {
             }
         }
         final long acksDuring = flow.gateway.in.acks - ackBefore;
-        System.out.println("[order-journal stall] " + what + ": not ready after " + notReadyMs + " ms (alarm bound "
-                + ALARM_MS + " ms + fill); held " + holdMs + " ms; acks during the stall " + acksDuring + "; roles " + roles
-                + "; ring used " + j.ringUsedBytes() + " B, recorded " + j.recordedSeq());
+        System.out.println("[order-journal stall] " + what + ": the journal alarm closed readiness after " + notReadyMs
+                + " ms (alarm bound " + ALARM_MS + " ms + fill); held " + holdMs + " ms; acks during the stall "
+                + acksDuring + "; roles " + roles + "; ring used " + j.ringUsedBytes() + " B, recorded "
+                + j.recordedSeq());
         w.start(m.id);
         final long head = flow.request - 1;
         rig.await(() -> flow.gateway.in.acks >= head, 120_000, () -> what + ": acks " + flow.gateway.in.acks + " of " + head);

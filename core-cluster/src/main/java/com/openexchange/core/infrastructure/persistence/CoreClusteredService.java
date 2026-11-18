@@ -1076,7 +1076,8 @@ public final class CoreClusteredService implements ClusteredService {
             readyOutsideSnapshot = readiness.ready();
         }
         if (orderJournal != null) {
-            orderJournal.alarmed(nowNs);
+            // a fresh clock: nowNs is the duty cycle's start, seconds old after a wait on a full ring
+            orderJournal.sampleAlarm(System.nanoTime());
         }
         shadowProducer.onBackgroundWork(nowNs, cluster.logPosition(), cluster.memberId());
         if (pendingOutsideCallbackPosition >= 0) {

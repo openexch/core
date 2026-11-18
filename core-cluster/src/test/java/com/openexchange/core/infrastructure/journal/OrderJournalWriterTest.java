@@ -17,7 +17,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -116,6 +119,91 @@ public class OrderJournalWriterTest {
             return;
         }
         fail("the control closed readiness with the no-progress alarm off");
+    }
+
+    /**
+     * The alarm is sampled by several threads. A sampler that read the condition clear (an empty ring, nothing
+     * waiting), then lost the CPU before it wrote its window, must not erase a window that another sampler opened and
+     * that matured meanwhile: once the alarm reads true it keeps reading true while the stall holds. The fill bound
+     * alone.
+     */
+    @Test
+    public void aLateSamplerCannotReopenReadinessOverAFullRing() throws Exception {
+        aLateSamplerCannotReopenReadiness(true);
+    }
+
+    /** The same with the no-progress alarm alone (a fill bound no ring passes): records stay unrecorded. */
+    @Test
+    public void aLateSamplerCannotReopenReadinessOverUnrecordedRecords() throws Exception {
+        aLateSamplerCannotReopenReadiness(false);
+    }
+
+    private static void aLateSamplerCannotReopenReadiness(final boolean fill) throws Exception {
+        final OrderJournal j = new OrderJournal(settings(Map.of(
+                OrderJournalSettings.Key.CORE_ORDER_JOURNAL_RING_BYTES, "4096",
+                OrderJournalSettings.Key.CORE_ORDER_JOURNAL_RING_ALARM_PCT, fill ? "50" : "100",
+                OrderJournalSettings.Key.CORE_ORDER_JOURNAL_RING_ALARM_MS, "100")));
+        OrderJournalCapture.progressAlarmOff(j, fill);
+        final long t = System.nanoTime();
+        final CountDownLatch observed = new CountDownLatch(1);
+        final CountDownLatch resume = new CountDownLatch(1);
+        final Thread[] late = new Thread[1];
+        final int[] observations = {0};
+        final int pauseAt = fill ? 1 : 2; // a sample reads the fill bound first, then the recorded sequence
+        j.afterObservation = () -> {
+            if (Thread.currentThread() == late[0] && ++observations[0] == pauseAt) {
+                observed.countDown();
+                try {
+                    resume.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+        late[0] = new Thread(() -> j.alarmed(t), "late-sampler");
+        late[0].start();
+        assertTrue("the late sampler read the clear condition", observed.await(10, TimeUnit.SECONDS));
+        for (long seq = 1; seq <= 12; seq++) {
+            emit(j, seq); // the stall: 12 of 18 records in the ring (above half), none recorded
+        }
+        final FutureTask<Boolean> probe = new FutureTask<>(() -> {
+            j.alarmed(t + TimeUnit.MILLISECONDS.toNanos(10));
+            return j.alarmed(t + TimeUnit.MILLISECONDS.toNanos(200));
+        });
+        final Thread prober = new Thread(probe, "probe");
+        prober.start();
+        try {
+            probe.get(300, TimeUnit.MILLISECONDS);
+        } catch (final TimeoutException waitsForTheLateSample) {
+            // a sampler may wait for the one in progress
+        }
+        resume.countDown();
+        late[0].join(10_000);
+        assertTrue("the stall matured: alarmed after 200 ms", probe.get(10, TimeUnit.SECONDS));
+        for (int i = 3; i <= 6; i++) {
+            if (!j.alarmed(t + TimeUnit.MILLISECONDS.toNanos(100L * i))) {
+                throw new AssertionError("member with a stalled order journal reads ready: "
+                        + (fill ? "fill" : "progress") + " alarm at " + (100 * i) + " ms after a late sample, "
+                        + j.ringUsedBytes() + " B in the ring,"
+                        + " appended " + j.appendedSeq() + ", recorded " + j.recordedSeq());
+            }
+        }
+    }
+
+    /** Samples carry their callers' clocks: one stamped before a sample already taken cannot reopen readiness. */
+    @Test
+    public void aSampleStampedBeforeTheLastCannotReopenReadiness() {
+        final OrderJournal j = new OrderJournal(settings(Map.of(
+                OrderJournalSettings.Key.CORE_ORDER_JOURNAL_RING_ALARM_MS, "100")));
+        emit(j, 1);
+        final long t = System.nanoTime();
+        assertTrue("inside the bound", !j.alarmed(t));
+        assertTrue("matured", j.alarmed(t + TimeUnit.MILLISECONDS.toNanos(200)));
+        if (!j.alarmed(t + TimeUnit.MILLISECONDS.toNanos(50))) {
+            throw new AssertionError("member with a stalled order journal reads ready: a sample stamped 150 ms before"
+                    + " the last one read the alarm clear, appended " + j.appendedSeq() + ", recorded "
+                    + j.recordedSeq());
+        }
     }
 
     // ------------------------------------------------------------------------------------------ full ring
