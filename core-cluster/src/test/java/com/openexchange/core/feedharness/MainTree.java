@@ -24,7 +24,7 @@ public final class MainTree {
      * The core the harness is graded against (cluster-tools {@code money_schema_ref}): provenance. A runtime branch
      * commit, so it need not be in this clone's history (a squash merge never puts it on main; CI clones shallow).
      */
-    public static final String MONEY_SCHEMA_REF = "e4d9221026710493f52a471a2ae8a6cc76fd50be";
+    public static final String MONEY_SCHEMA_REF = "89da7169d2849026db5387224ee1480d6c8b4167";
 
     /**
      * The guard: {@link #id} of {@link #MONEY_SCHEMA_REF}'s {@code src/main} trees. A function of file paths and blob
@@ -32,7 +32,7 @@ public final class MainTree {
      * lock-pinned harness carries it as {@code main_tree_ref_id}.
      */
     public static final String MONEY_SCHEMA_MAIN_TREE_ID =
-            "64553d50fd82e225344778b093520486b52e3c57a3cf222c9c5a62085e350878";
+            "59f8c05b71b9bf85ab427023a57480ec27cd857f19282cfa32ba7f438d1700dd";
 
     private MainTree() {
     }
