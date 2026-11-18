@@ -67,9 +67,9 @@ public class PostgresMoneyJournalStoreIntegrationTest {
         final long depositSeq = seqBase + 1;
         final long settleSeq = seqBase + 2;
         final List<MoneyJournalRecord> batch = List.of(
-                MoneyJournalRecord.deposit(depositSeq, 1001L, 2, 500_000L, 1_500_000L, 42L),
+                MoneyJournalRecord.deposit(depositSeq, 1001L, 2, 500_000L, 1_500_000L, 42L, 640L),
                 MoneyJournalRecord.settle(settleSeq, 55L, 5, 1_000_000L, 2_000_000L, 200L, 300L, true,
-                        11L, 22L, 33L, 44L, 77L));
+                        11L, 22L, 33L, 44L, 77L, 704L));
 
         store.project(batch);
         assertEquals("deposit -> 1 leg", 1, legCount(depositSeq));

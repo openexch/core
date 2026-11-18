@@ -12,31 +12,33 @@ package com.openexchange.core.domain;
  * rows included). {@code balanceAfter} values are the post-event (available + locked) TOTAL for the
  * (user, asset): the journal carries no hold/release events, and holds do not change totals, so
  * totals are the only self-consistent balance representation. {@code clusterTimeMs} is the cluster's
- * deterministic log timestamp, never wall clock.</p>
+ * deterministic log timestamp, never wall clock. {@code logPosition} is the frame-end position of the log entry
+ * being applied (the engine's stamped position), the same on every member; epoch rows carry the position of the
+ * movement that engaged journaling.</p>
  */
 public interface MoneyJournalSink {
 
     /** Dark default: journaling disabled costs a dead branch per apply, never a null check. */
     MoneyJournalSink NO_OP = new MoneyJournalSink() {
         @Override
-        public void onOpeningBalance(long journalSeq, long userId, int assetId, long amount) {
+        public void onOpeningBalance(long journalSeq, long userId, int assetId, long amount, long logPosition) {
         }
 
         @Override
         public void onDeposit(long journalSeq, long userId, int assetId, long amount,
-                              long balanceAfter, long clusterTimeMs) {
+                              long balanceAfter, long clusterTimeMs, long logPosition) {
         }
 
         @Override
         public void onWithdraw(long journalSeq, long userId, int assetId, long amount,
-                               long balanceAfter, long clusterTimeMs) {
+                               long balanceAfter, long clusterTimeMs, long logPosition) {
         }
 
         @Override
         public void onSettle(long journalSeq, long tradeId, int marketId, long price, long quantity,
                              long buyerUserId, long sellerUserId, boolean takerIsBuy,
                              long buyerBaseAfter, long buyerQuoteAfter,
-                             long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs) {
+                             long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs, long logPosition) {
         }
     };
 
@@ -45,15 +47,15 @@ public interface MoneyJournalSink {
      * instant journaling first engaged on a non-empty ledger. Emitted in ascending (userId, assetId)
      * order before the first journaled movement.
      */
-    void onOpeningBalance(long journalSeq, long userId, int assetId, long amount);
+    void onOpeningBalance(long journalSeq, long userId, int assetId, long amount, long logPosition);
 
     /** An applied deposit. */
     void onDeposit(long journalSeq, long userId, int assetId, long amount,
-                   long balanceAfter, long clusterTimeMs);
+                   long balanceAfter, long clusterTimeMs, long logPosition);
 
     /** An applied withdrawal. */
     void onWithdraw(long journalSeq, long userId, int assetId, long amount,
-                    long balanceAfter, long clusterTimeMs);
+                    long balanceAfter, long clusterTimeMs, long logPosition);
 
     /**
      * An applied settle, one record per trade (the projector explodes it to per-leg rows). The four
@@ -63,5 +65,5 @@ public interface MoneyJournalSink {
     void onSettle(long journalSeq, long tradeId, int marketId, long price, long quantity,
                   long buyerUserId, long sellerUserId, boolean takerIsBuy,
                   long buyerBaseAfter, long buyerQuoteAfter,
-                  long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs);
+                  long sellerBaseAfter, long sellerQuoteAfter, long clusterTimeMs, long logPosition);
 }

@@ -43,10 +43,10 @@ public final class MoneyJournalTail {
     /** Byte offset of {@code journalSeq} inside every journal message (SBE header 8 + the first field). */
     public static final int JOURNAL_SEQ_OFFSET = 8;
     /**
-     * One journal message: header + JournalSettle (93) = 101 bytes, plus the 32-byte data header, aligned. A format
-     * constant coupled to the largest journal message: if a future message is larger, no window up to this length fits
-     * and the read falls through to the whole-last-term replay below (still correct, slower), so raise it with the
-     * codec.
+     * One journal message: header + JournalSettle (101 in version 2) = 109 bytes, plus the 32-byte data header,
+     * aligned. A format constant coupled to the largest journal message: if a future message is larger, no window up to
+     * this length fits and the read falls through to the whole-last-term replay below (still correct, slower), so raise
+     * it with the codec.
      */
     public static final int MAX_FRAME_LENGTH = 160;
 

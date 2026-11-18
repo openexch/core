@@ -2,6 +2,9 @@
 package com.openexchange.core.infrastructure.journal;
 
 import com.openexchange.core.infrastructure.InfrastructureConstants;
+import com.openexchange.core.infrastructure.journal.generated.JournalDepositEncoder;
+import com.openexchange.core.infrastructure.journal.generated.JournalSettleEncoder;
+import com.openexchange.core.infrastructure.journal.generated.MessageHeaderEncoder;
 import com.openexchange.cluster.testkit.RecordedLogFixture;
 import io.aeron.ExclusivePublication;
 import io.aeron.archive.client.AeronArchive;
@@ -24,6 +27,10 @@ public class MoneyJournalTailTest {
 
     private static final String CHANNEL = "aeron:ipc?term-length=64k";
     private static final long TIMEOUT_NS = TimeUnit.SECONDS.toNanos(20);
+    /** The largest journal message (a settle, 109 bytes): a 160-byte aligned frame. */
+    private static final int SETTLE_LENGTH = MessageHeaderEncoder.ENCODED_LENGTH + JournalSettleEncoder.BLOCK_LENGTH;
+    /** A deposit (60 bytes): a 96-byte aligned frame. */
+    private static final int DEPOSIT_LENGTH = MessageHeaderEncoder.ENCODED_LENGTH + JournalDepositEncoder.BLOCK_LENGTH;
 
     /** A journal-shaped message: 8-byte SBE header, journalSeq at offset 8, then {@code length - 16} filler bytes. */
     private static void write(final ExclusivePublication pub, final long seq, final int length) {
@@ -64,22 +71,22 @@ public class MoneyJournalTailTest {
             final MoneyJournalTail.Result empty = tail.read(TIMEOUT_NS);
             assertTrue("no journal recording: " + empty, empty instanceof MoneyJournalTail.NoJournal);
 
-            // A: seq 1..50, ends with a settle-sized message (101 B, a 160-byte frame); stopped
+            // A: seq 1..50, ends with a settle-sized message (109 B, a 160-byte frame); stopped
             final ExclusivePublication a = fx.archive().addRecordedExclusivePublication(CHANNEL,
                     InfrastructureConstants.MONEY_JOURNAL_STREAM_ID);
             for (int s = 1; s <= 50; s++) {
-                write(a, s, s % 2 == 0 ? 101 : 52);
+                write(a, s, s % 2 == 0 ? SETTLE_LENGTH : DEPOSIT_LENGTH);
             }
             awaitRecorded(fx.archive(), a);
             final int aSession = a.sessionId();
             a.close();
             awaitStopped(fx.archive(), InfrastructureConstants.MONEY_JOURNAL_STREAM_ID, aSession);
 
-            // B: a newer, SHORTER recording (seq 1..9), ends with a deposit-sized message (52 B, a 96-byte frame)
+            // B: a newer, SHORTER recording (seq 1..9), ends with a deposit-sized message (60 B, a 96-byte frame)
             final ExclusivePublication b = fx.archive().addRecordedExclusivePublication(CHANNEL,
                     InfrastructureConstants.MONEY_JOURNAL_STREAM_ID);
             for (int s = 1; s <= 9; s++) {
-                write(b, s, 52);
+                write(b, s, DEPOSIT_LENGTH);
             }
             awaitRecorded(fx.archive(), b);
             final int bSession = b.sessionId();
@@ -94,7 +101,7 @@ public class MoneyJournalTailTest {
             final ExclusivePublication c = fx.archive().addRecordedExclusivePublication(CHANNEL,
                     InfrastructureConstants.MONEY_JOURNAL_STREAM_ID);
             for (int s = 70; s <= 77; s++) {
-                write(c, s, s == 77 ? 101 : 52);
+                write(c, s, s == 77 ? SETTLE_LENGTH : DEPOSIT_LENGTH);
             }
             awaitRecorded(fx.archive(), c);
             final MoneyJournalTail.Result active = tail.read(TIMEOUT_NS);

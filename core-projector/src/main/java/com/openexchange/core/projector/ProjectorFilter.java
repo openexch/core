@@ -12,28 +12,30 @@ package com.openexchange.core.projector;
  * The filter itself never needs persistence.
  *
  * Rules (in decision order):
- *  1. HALTED is latched: after a detected gap nothing is ever projected again by this filter
- *     (correctness over liveness). A dense gap is a lost money movement; projecting past it would
- *     silently mis-state the ledger forever.
+ *  1. GAP is latched: after a detected gap nothing more is projected by this filter (correctness
+ *     over liveness). A dense gap is a lost money movement on the source read; projecting past it
+ *     would silently mis-state the ledger forever. The agent decides what a gap means (another
+ *     source, or a park).
  *  2. {@code journalSeq <= highWater} was already projected (startup overlap, replay overlap across
- *     recordings, restart-duplicate) -> SKIP.
- *  3. A projected record must be EXACTLY {@code highWater + 1}. Anything greater is a GAP: HALT
+ *     recordings, restart-duplicate) -> DUPLICATE: never inserted, always compared with what was
+ *     stored (a difference is a determinism fault, never skipped silently).
+ *  3. A projected record must be EXACTLY {@code highWater + 1}. Anything greater is a GAP
  *     (or, with haltOnGap=false, PROJECT anyway after counting -> an explicit operator override).
  */
 public final class ProjectorFilter {
 
-    public enum Action { PROJECT, SKIP, HALT }
+    public enum Action { PROJECT, DUPLICATE, GAP }
 
     private final boolean haltOnGap;
 
     private long highWater;
-    private boolean halted;
-    private long skipped;
+    private boolean gapped;
+    private long duplicates;
     private long gapsDetected;
 
     /**
      * @param highWater the Postgres MAX(journal_seq) at epoch start (0 on an empty ledger)
-     * @param haltOnGap latch HALT on a dense journalSeq gap (production default true)
+     * @param haltOnGap latch GAP on a dense journalSeq gap (production default true)
      */
     public ProjectorFilter(final long highWater, final boolean haltOnGap) {
         this.highWater = highWater;
@@ -41,18 +43,18 @@ public final class ProjectorFilter {
     }
 
     public Action onRecord(final long journalSeq) {
-        if (halted) {
-            return Action.HALT;
+        if (gapped) {
+            return Action.GAP;
         }
         if (journalSeq <= highWater) {
-            skipped++;
-            return Action.SKIP;
+            duplicates++;
+            return Action.DUPLICATE;
         }
         if (journalSeq != highWater + 1) {
             gapsDetected++;
             if (haltOnGap) {
-                halted = true;
-                return Action.HALT;
+                gapped = true;
+                return Action.GAP;
             }
             // Operator override: project past the gap, loudly counted.
         }
@@ -60,16 +62,17 @@ public final class ProjectorFilter {
         return Action.PROJECT;
     }
 
-    public boolean halted() {
-        return halted;
+    /** True once a gap latched this filter. */
+    public boolean gapped() {
+        return gapped;
     }
 
     public long highWater() {
         return highWater;
     }
 
-    public long skipped() {
-        return skipped;
+    public long duplicates() {
+        return duplicates;
     }
 
     public long gapsDetected() {

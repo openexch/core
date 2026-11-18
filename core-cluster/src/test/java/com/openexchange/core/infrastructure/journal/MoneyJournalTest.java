@@ -50,12 +50,12 @@ public class MoneyJournalTest {
     public void allFourRecordTypesRoundTripInAppendOrder() {
         final MoneyJournal journal = new MoneyJournal(1 << 16);
 
-        journal.onOpeningBalance(1L, 100L, 1, 100_000_000L);
-        journal.onDeposit(2L, 300L, 0, 10_000_000_000L, 10_000_000_000L, 1_752_100_000_123L);
-        journal.onWithdraw(3L, 300L, 0, 4_000_000_000L, 6_000_000_000L, 1_752_100_000_124L);
+        journal.onOpeningBalance(1L, 100L, 1, 100_000_000L, 4_160L);
+        journal.onDeposit(2L, 300L, 0, 10_000_000_000L, 10_000_000_000L, 1_752_100_000_123L, 4_160L);
+        journal.onWithdraw(3L, 300L, 0, 4_000_000_000L, 6_000_000_000L, 1_752_100_000_124L, 8_384L);
         journal.onSettle(4L, 42L, 1, 6_000_000_000_000L, 100_000_000L,
                 200L, 100L, true,
-                100_000_000L, 0L, 0L, 6_000_500_000_000L, 1_752_100_000_125L);
+                100_000_000L, 0L, 0L, 6_000_500_000_000L, 1_752_100_000_125L, 12_608L);
 
         final Drained drained = drainAll(journal);
         assertEquals(4, drained.msgTypes.size());
@@ -69,12 +69,14 @@ public class MoneyJournalTest {
         final UnsafeBuffer buf0 = new UnsafeBuffer(drained.payloads.get(0));
         header.wrap(buf0, 0);
         assertEquals(JournalOpeningBalanceDecoder.TEMPLATE_ID, header.templateId());
+        assertEquals("every record is written as version 2", 2, header.version());
         final JournalOpeningBalanceDecoder opening = new JournalOpeningBalanceDecoder()
                 .wrap(buf0, header.encodedLength(), header.blockLength(), header.version());
         assertEquals(1L, opening.journalSeq());
         assertEquals(100L, opening.userId());
         assertEquals(1, opening.assetId());
         assertEquals(100_000_000L, opening.amount());
+        assertEquals(4_160L, opening.logPosition());
 
         final UnsafeBuffer buf1 = new UnsafeBuffer(drained.payloads.get(1));
         header.wrap(buf1, 0);
@@ -87,6 +89,7 @@ public class MoneyJournalTest {
         assertEquals(10_000_000_000L, deposit.amount());
         assertEquals(10_000_000_000L, deposit.balanceAfter());
         assertEquals(1_752_100_000_123L, deposit.clusterTimeMs());
+        assertEquals(4_160L, deposit.logPosition());
 
         final UnsafeBuffer buf2 = new UnsafeBuffer(drained.payloads.get(2));
         header.wrap(buf2, 0);
@@ -99,6 +102,7 @@ public class MoneyJournalTest {
         assertEquals(4_000_000_000L, withdraw.amount());
         assertEquals(6_000_000_000L, withdraw.balanceAfter());
         assertEquals(1_752_100_000_124L, withdraw.clusterTimeMs());
+        assertEquals(8_384L, withdraw.logPosition());
 
         final UnsafeBuffer buf3 = new UnsafeBuffer(drained.payloads.get(3));
         header.wrap(buf3, 0);
@@ -118,6 +122,9 @@ public class MoneyJournalTest {
         assertEquals(0L, settle.sellerBaseAfter());
         assertEquals(6_000_500_000_000L, settle.sellerQuoteAfter());
         assertEquals(1_752_100_000_125L, settle.clusterTimeMs());
+        assertEquals(12_608L, settle.logPosition());
+        assertEquals("the largest record still fits the tail reader's frame bound", 8 + 101,
+                drained.payloads.get(3).length);
 
         assertEquals(4L, journal.appendedEvents());
         assertEquals(0L, journal.backpressureEvents());
@@ -134,14 +141,15 @@ public class MoneyJournalTest {
         final MoneyJournal journal = new MoneyJournal(1 << 16);
         long seq = 0;
         for (int i = 0; i < 50; i++) {
-            journal.onDeposit(++seq, 100 + i, i % 3, 1_000_000L * (1 + i), 5_000_000L * (1 + i), 1_000_000L + i);
+            journal.onDeposit(++seq, 100 + i, i % 3, 1_000_000L * (1 + i), 5_000_000L * (1 + i), 1_000_000L + i,
+                    64L * seq);
             if (i % 5 == 0) {
                 journal.onSettle(++seq, 1 + i, 1 + (i % 5), 2_000_000L * (1 + i), 50_000_000L,
                         100 + i, 200 + i, (i & 1) == 0,
-                        10L * i, 20L * i, 30L * i, 40L * i, 1_000_001L + i);
+                        10L * i, 20L * i, 30L * i, 40L * i, 1_000_001L + i, 64L * seq);
             }
             if (i % 7 == 0) {
-                journal.onWithdraw(++seq, 100 + i, i % 3, 500_000L, 4_500_000L * (1 + i), 1_000_002L + i);
+                journal.onWithdraw(++seq, 100 + i, i % 3, 500_000L, 4_500_000L * (1 + i), 1_000_002L + i, 64L * seq);
             }
         }
         final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -162,7 +170,7 @@ public class MoneyJournalTest {
 
         // Fill by raw ring writes (same record size a deposit encodes to) until a write is
         // REFUSED: the ring is then deterministically too full for one more deposit record.
-        final UnsafeBuffer filler = new UnsafeBuffer(new byte[52]);
+        final UnsafeBuffer filler = new UnsafeBuffer(new byte[60]);
         while (journal.ringBuffer().write(MoneyJournal.MSG_TYPE_DEPOSIT, filler, 0, filler.capacity())) {
             // keep filling
         }
@@ -170,7 +178,7 @@ public class MoneyJournalTest {
 
         final CountDownLatch blockedAppendDone = new CountDownLatch(1);
         final Thread appender = new Thread(() -> {
-            journal.onDeposit(9999L, 1L, 0, 100L, 100L, 9999L);
+            journal.onDeposit(9999L, 1L, 0, 100L, 100L, 9999L, 9999L);
             blockedAppendDone.countDown();
         }, "test-blocked-appender");
         appender.start();

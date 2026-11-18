@@ -6,6 +6,7 @@ import org.junit.Test;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -19,7 +20,7 @@ public class MoneyJournalRecordTest {
 
     @Test
     public void depositMapsToOneLegWithPositiveDelta() {
-        MoneyJournalRecord r = MoneyJournalRecord.deposit(7L, 1001L, 2, 500_000L, 1_500_000L, 42L);
+        MoneyJournalRecord r = MoneyJournalRecord.deposit(7L, 1001L, 2, 500_000L, 1_500_000L, 42L, 9_000L);
         assertEquals(7L, r.journalSeq());
         assertEquals(MoneyJournalRecord.TYPE_DEPOSIT, r.movementType());
         assertEquals(Long.valueOf(42L), r.clusterTimeMs());
@@ -43,7 +44,7 @@ public class MoneyJournalRecordTest {
 
     @Test
     public void withdrawMapsToOneLegWithNegativeDelta() {
-        MoneyJournalRecord r = MoneyJournalRecord.withdraw(8L, 1001L, 2, 300_000L, 1_200_000L, 43L);
+        MoneyJournalRecord r = MoneyJournalRecord.withdraw(8L, 1001L, 2, 300_000L, 1_200_000L, 43L, 9_100L);
         assertEquals(MoneyJournalRecord.TYPE_WITHDRAW, r.movementType());
         assertEquals(1, r.legs().size());
         MoneyJournalRecord.Leg leg = r.legs().get(0);
@@ -55,7 +56,7 @@ public class MoneyJournalRecordTest {
 
     @Test
     public void openingMapsToOneLegNoClusterTimeNoDelta() {
-        MoneyJournalRecord r = MoneyJournalRecord.opening(1L, 1001L, 3, 9_000_000L);
+        MoneyJournalRecord r = MoneyJournalRecord.opening(1L, 1001L, 3, 9_000_000L, 8_800L);
         assertEquals(MoneyJournalRecord.TYPE_OPENING, r.movementType());
         assertNull("opening epoch has no cluster timestamp", r.clusterTimeMs());
         assertEquals(Long.valueOf(9_000_000L), r.amount());
@@ -77,9 +78,11 @@ public class MoneyJournalRecordTest {
                 /*buyerQuoteAfter*/ 22L,
                 /*sellerBaseAfter*/ 33L,
                 /*sellerQuoteAfter*/44L,
-                /*clusterTimeMs*/   77L);
+                /*clusterTimeMs*/   77L,
+                /*logPosition*/     12_345L);
 
         assertEquals(MoneyJournalRecord.TYPE_SETTLE, r.movementType());
+        assertEquals(12_345L, r.logPosition());
         // Settle carries market_id on the header, not per-leg; single user/asset/amount stay null.
         assertEquals(Long.valueOf(55L), r.tradeId());
         assertEquals(Integer.valueOf(5), r.marketId());
@@ -110,9 +113,26 @@ public class MoneyJournalRecordTest {
     @Test
     public void settleTakerIsBuyFalseIsCarried() {
         MoneyJournalRecord r = MoneyJournalRecord.settle(
-                101L, 56L, 5, 1L, 1L, 200L, 300L, false, 1L, 2L, 3L, 4L, 78L);
+                101L, 56L, 5, 1L, 1L, 200L, 300L, false, 1L, 2L, 3L, 4L, 78L, 1L);
         assertEquals(Boolean.FALSE, r.takerIsBuy());
         assertTrue(r.legs().stream().allMatch(l -> l.assetId() == null));
+    }
+
+    @Test
+    public void equalityIsOverEveryProjectedFieldLegsAndLogPositionIncluded() {
+        final MoneyJournalRecord a = MoneyJournalRecord.settle(9L, 1L, 2, 3L, 4L, 5L, 6L, true, 7L, 8L, 9L, 10L, 11L, 12L);
+        assertEquals(a, MoneyJournalRecord.settle(9L, 1L, 2, 3L, 4L, 5L, 6L, true, 7L, 8L, 9L, 10L, 11L, 12L));
+        assertEquals(a, MoneyJournalRecord.stored(9L, 12L, MoneyJournalRecord.TYPE_SETTLE, 11L, null, null, null, null,
+                1L, 2, 3L, 4L, 5L, 6L, true, a.legs()));
+        assertNotEquals("a leg total", a,
+                MoneyJournalRecord.settle(9L, 1L, 2, 3L, 4L, 5L, 6L, true, 7L, 8L, 9L, 99L, 11L, 12L));
+        assertNotEquals("the log position", a,
+                MoneyJournalRecord.settle(9L, 1L, 2, 3L, 4L, 5L, 6L, true, 7L, 8L, 9L, 10L, 11L, 13L));
+        assertNotEquals("the taker side", a,
+                MoneyJournalRecord.settle(9L, 1L, 2, 3L, 4L, 5L, 6L, false, 7L, 8L, 9L, 10L, 11L, 12L));
+        assertNotEquals("an amount", MoneyJournalRecord.deposit(1L, 2L, 3, 4L, 5L, 6L, 7L),
+                MoneyJournalRecord.deposit(1L, 2L, 3, 40L, 5L, 6L, 7L));
+        assertNotEquals("no stored row", a, null);
     }
 
     private static void assertLeg(MoneyJournalRecord.Leg leg, short legNo, long userId, short role,

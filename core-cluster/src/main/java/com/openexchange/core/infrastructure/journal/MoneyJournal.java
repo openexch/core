@@ -45,7 +45,7 @@ public final class MoneyJournal implements MoneyJournalSink {
 
     private final OneToOneRingBuffer ringBuffer;
 
-    // Scratch encode buffer: max message = header(8) + JournalSettle block (93) < 128.
+    // Scratch encode buffer: max message = header(8) + JournalSettle block (101) < 128.
     private final UnsafeBuffer scratch = new UnsafeBuffer(ByteBuffer.allocateDirect(128));
     private final MessageHeaderEncoder headerEncoder = new MessageHeaderEncoder();
     private final JournalOpeningBalanceEncoder openingBalanceEncoder = new JournalOpeningBalanceEncoder();
@@ -69,40 +69,44 @@ public final class MoneyJournal implements MoneyJournalSink {
     }
 
     @Override
-    public void onOpeningBalance(final long journalSeq, final long userId, final int assetId, final long amount) {
+    public void onOpeningBalance(final long journalSeq, final long userId, final int assetId, final long amount,
+                                 final long logPosition) {
         openingBalanceEncoder.wrapAndApplyHeader(scratch, 0, headerEncoder)
                 .journalSeq(journalSeq)
                 .userId(userId)
                 .assetId(assetId)
-                .amount(amount);
+                .amount(amount)
+                .logPosition(logPosition);
         blockingWrite(MSG_TYPE_OPENING_BALANCE,
                 MessageHeaderEncoder.ENCODED_LENGTH + openingBalanceEncoder.encodedLength(), journalSeq);
     }
 
     @Override
     public void onDeposit(final long journalSeq, final long userId, final int assetId, final long amount,
-                          final long balanceAfter, final long clusterTimeMs) {
+                          final long balanceAfter, final long clusterTimeMs, final long logPosition) {
         depositEncoder.wrapAndApplyHeader(scratch, 0, headerEncoder)
                 .journalSeq(journalSeq)
                 .userId(userId)
                 .assetId(assetId)
                 .amount(amount)
                 .balanceAfter(balanceAfter)
-                .clusterTimeMs(clusterTimeMs);
+                .clusterTimeMs(clusterTimeMs)
+                .logPosition(logPosition);
         blockingWrite(MSG_TYPE_DEPOSIT,
                 MessageHeaderEncoder.ENCODED_LENGTH + depositEncoder.encodedLength(), journalSeq);
     }
 
     @Override
     public void onWithdraw(final long journalSeq, final long userId, final int assetId, final long amount,
-                           final long balanceAfter, final long clusterTimeMs) {
+                           final long balanceAfter, final long clusterTimeMs, final long logPosition) {
         withdrawEncoder.wrapAndApplyHeader(scratch, 0, headerEncoder)
                 .journalSeq(journalSeq)
                 .userId(userId)
                 .assetId(assetId)
                 .amount(amount)
                 .balanceAfter(balanceAfter)
-                .clusterTimeMs(clusterTimeMs);
+                .clusterTimeMs(clusterTimeMs)
+                .logPosition(logPosition);
         blockingWrite(MSG_TYPE_WITHDRAW,
                 MessageHeaderEncoder.ENCODED_LENGTH + withdrawEncoder.encodedLength(), journalSeq);
     }
@@ -112,7 +116,8 @@ public final class MoneyJournal implements MoneyJournalSink {
                          final long price, final long quantity,
                          final long buyerUserId, final long sellerUserId, final boolean takerIsBuy,
                          final long buyerBaseAfter, final long buyerQuoteAfter,
-                         final long sellerBaseAfter, final long sellerQuoteAfter, final long clusterTimeMs) {
+                         final long sellerBaseAfter, final long sellerQuoteAfter, final long clusterTimeMs,
+                         final long logPosition) {
         settleEncoder.wrapAndApplyHeader(scratch, 0, headerEncoder)
                 .journalSeq(journalSeq)
                 .tradeId(tradeId)
@@ -126,7 +131,8 @@ public final class MoneyJournal implements MoneyJournalSink {
                 .buyerQuoteAfter(buyerQuoteAfter)
                 .sellerBaseAfter(sellerBaseAfter)
                 .sellerQuoteAfter(sellerQuoteAfter)
-                .clusterTimeMs(clusterTimeMs);
+                .clusterTimeMs(clusterTimeMs)
+                .logPosition(logPosition);
         blockingWrite(MSG_TYPE_SETTLE,
                 MessageHeaderEncoder.ENCODED_LENGTH + settleEncoder.encodedLength(), journalSeq);
     }

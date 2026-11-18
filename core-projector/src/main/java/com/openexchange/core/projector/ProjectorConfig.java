@@ -41,6 +41,14 @@ public final class ProjectorConfig {
      * set PROJECTOR_LOCAL_HOST to its routable IP or the archive replay silently starves.
      */
     public final String localHost;
+    /**
+     * How long a gap that one source showed may stay unfilled while no other source delivers anything (empty, quiet
+     * at the high-water, or unreachable) before the projector parks on it. Default
+     * {@link #DEFAULT_GAP_UNFILLED_PARK_MS}; PROJECTOR_GAP_UNFILLED_PARK_MS.
+     */
+    public final long gapUnfilledParkMs;
+
+    public static final long DEFAULT_GAP_UNFILLED_PARK_MS = 60_000;
 
     public ProjectorConfig(
             final List<String> journalArchiveEndpoints,
@@ -51,6 +59,23 @@ public final class ProjectorConfig {
             final boolean haltOnGap,
             final int metricsPort,
             final String localHost) {
+        this(journalArchiveEndpoints, archiveControlStreamId, postgresUrl, postgresUser, postgresPassword, haltOnGap,
+                metricsPort, localHost, DEFAULT_GAP_UNFILLED_PARK_MS);
+    }
+
+    public ProjectorConfig(
+            final List<String> journalArchiveEndpoints,
+            final int archiveControlStreamId,
+            final String postgresUrl,
+            final String postgresUser,
+            final String postgresPassword,
+            final boolean haltOnGap,
+            final int metricsPort,
+            final String localHost,
+            final long gapUnfilledParkMs) {
+        if (gapUnfilledParkMs <= 0) {
+            throw new IllegalArgumentException("PROJECTOR_GAP_UNFILLED_PARK_MS must be > 0, got " + gapUnfilledParkMs);
+        }
         this.journalArchiveEndpoints = journalArchiveEndpoints;
         this.archiveControlStreamId = archiveControlStreamId;
         this.postgresUrl = postgresUrl;
@@ -59,6 +84,7 @@ public final class ProjectorConfig {
         this.haltOnGap = haltOnGap;
         this.metricsPort = metricsPort;
         this.localHost = localHost;
+        this.gapUnfilledParkMs = gapUnfilledParkMs;
     }
 
     public static ProjectorConfig fromEnv() {
@@ -73,7 +99,8 @@ public final class ProjectorConfig {
                 secretOr("PROJECTOR_POSTGRES_PASSWORD", ""),
                 !"false".equalsIgnoreCase(envOr("PROJECTOR_HALT_ON_GAP", "true")),
                 Integer.parseInt(envOr("PROJECTOR_METRICS_PORT", "9601")),
-                envOr("PROJECTOR_LOCAL_HOST", "localhost"));
+                envOr("PROJECTOR_LOCAL_HOST", "localhost"),
+                Long.parseLong(envOr("PROJECTOR_GAP_UNFILLED_PARK_MS", Long.toString(DEFAULT_GAP_UNFILLED_PARK_MS))));
     }
 
     private static String envOr(final String key, final String fallback) {

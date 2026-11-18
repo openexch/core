@@ -10,11 +10,11 @@ import org.agrona.MutableDirectBuffer;
 @SuppressWarnings("all")
 public final class JournalWithdrawEncoder
 {
-    public static final int BLOCK_LENGTH = 44;
+    public static final int BLOCK_LENGTH = 52;
     public static final int TEMPLATE_ID = 3;
     public static final int SCHEMA_ID = 3;
-    public static final int SCHEMA_VERSION = 1;
-    public static final String SEMANTIC_VERSION = "0.1";
+    public static final int SCHEMA_VERSION = 2;
+    public static final String SEMANTIC_VERSION = "0.2";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final JournalWithdrawEncoder parentMessage = this;
@@ -405,6 +405,58 @@ public final class JournalWithdrawEncoder
     public JournalWithdrawEncoder clusterTimeMs(final long value)
     {
         buffer.putLong(offset + 36, value, BYTE_ORDER);
+        return this;
+    }
+
+
+    public static int logPositionId()
+    {
+        return 7;
+    }
+
+    public static int logPositionSinceVersion()
+    {
+        return 2;
+    }
+
+    public static int logPositionEncodingOffset()
+    {
+        return 44;
+    }
+
+    public static int logPositionEncodingLength()
+    {
+        return 8;
+    }
+
+    public static String logPositionMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static long logPositionNullValue()
+    {
+        return -9223372036854775808L;
+    }
+
+    public static long logPositionMinValue()
+    {
+        return -9223372036854775807L;
+    }
+
+    public static long logPositionMaxValue()
+    {
+        return 9223372036854775807L;
+    }
+
+    public JournalWithdrawEncoder logPosition(final long value)
+    {
+        buffer.putLong(offset + 44, value, BYTE_ORDER);
         return this;
     }
 
