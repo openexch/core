@@ -241,8 +241,9 @@ public class TransportLogChannelTest {
         before.print(out);
         assertEquals(1024L * 1024, t.archiveSegment().length());
         final String[] lines = out.split("\n");
-        assertTrue(out, lines.length == 2 && lines[0].startsWith("[BOOT-GUARD] log channel ")
-                && lines[1].equals("[BOOT-GUARD] archive segment 1m set (1048576 B; a log purge removes whole segments)"));
+        assertTrue(out, lines.length == 3 && lines[0].startsWith("[BOOT-GUARD] log channel ")
+                && lines[1].equals("[BOOT-GUARD] archive segment 1m set (1048576 B; a log purge removes whole segments)")
+                && lines[2].equals("[BOOT-GUARD] embedded driver client liveness 5000 ms, publication unblock 10000 ms"));
 
         // the archive context the member builds reads the setting (the property form of the env name)
         final String prop = "archive.segment.length";

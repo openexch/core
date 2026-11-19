@@ -314,6 +314,74 @@ public final class TransportConfig {
         return ms;
     }
 
+    /** {@code TRANSPORT_DRIVER_CLIENT_LIVENESS_MS}: the embedded driver's client liveness timeout (external: aeronmd's). */
+    public static final String DRIVER_CLIENT_LIVENESS_MS = "TRANSPORT_DRIVER_CLIENT_LIVENESS_MS";
+    /** {@code TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS}: the embedded driver's publication unblock timeout. */
+    public static final String DRIVER_PUBLICATION_UNBLOCK_MS = "TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS";
+    public static final long DEFAULT_DRIVER_CLIENT_LIVENESS_MS = 5_000;
+    public static final long DEFAULT_DRIVER_PUBLICATION_UNBLOCK_MS = 10_000;
+    static final long MIN_DRIVER_CLIENT_LIVENESS_MS = 1_000;
+    static final long MAX_DRIVER_CLIENT_LIVENESS_MS = 600_000;
+    static final long MIN_DRIVER_PUBLICATION_UNBLOCK_MS = 2_000;
+    static final long MAX_DRIVER_PUBLICATION_UNBLOCK_MS = 1_200_000;
+
+    /**
+     * The embedded member driver's two client timeouts, parsed once at boot. {@code clientLivenessMs}: a client whose
+     * conductor has not reached the driver for this long is closed by the driver, and the client closes itself when its
+     * own conductor stalled for as long (a whole-process pause above it ends the member with exit 1).
+     * {@code publicationUnblockMs}: a publication blocked by a stalled claim is unblocked after this long; Aeron needs
+     * it above the liveness.
+     */
+    public record DriverTimeouts(long clientLivenessMs, long publicationUnblockMs) {
+
+        /** The defaults: 5000 and 10000 ms. */
+        public static DriverTimeouts defaults() {
+            return new DriverTimeouts(DEFAULT_DRIVER_CLIENT_LIVENESS_MS, DEFAULT_DRIVER_PUBLICATION_UNBLOCK_MS);
+        }
+
+        /**
+         * {@code TRANSPORT_DRIVER_CLIENT_LIVENESS_MS} (default 5000, 1000..600000) and
+         * {@code TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS} (default 10000, 2000..1200000, above the liveness).
+         *
+         * @throws IllegalArgumentException naming the setting, its range or the liveness it must exceed
+         */
+        public static DriverTimeouts parse(final java.util.function.Function<String, String> env) {
+            final long liveness = millis(env, DRIVER_CLIENT_LIVENESS_MS, DEFAULT_DRIVER_CLIENT_LIVENESS_MS,
+                    MIN_DRIVER_CLIENT_LIVENESS_MS, MAX_DRIVER_CLIENT_LIVENESS_MS);
+            final long unblock = millis(env, DRIVER_PUBLICATION_UNBLOCK_MS, DEFAULT_DRIVER_PUBLICATION_UNBLOCK_MS,
+                    MIN_DRIVER_PUBLICATION_UNBLOCK_MS, MAX_DRIVER_PUBLICATION_UNBLOCK_MS);
+            if (unblock <= liveness) {
+                throw new IllegalArgumentException(DRIVER_PUBLICATION_UNBLOCK_MS + " " + unblock + " must exceed "
+                        + DRIVER_CLIENT_LIVENESS_MS + " " + liveness + " (Aeron refuses the driver otherwise)");
+            }
+            return new DriverTimeouts(liveness, unblock);
+        }
+
+        /** The boot line: both values. */
+        public String line() {
+            return "embedded driver client liveness " + clientLivenessMs + " ms, publication unblock "
+                    + publicationUnblockMs + " ms";
+        }
+
+        private static long millis(final java.util.function.Function<String, String> env, final String name,
+                                   final long defaultMs, final long min, final long max) {
+            final String v = env.apply(name);
+            if (v == null || v.isBlank()) {
+                return defaultMs;
+            }
+            final long ms;
+            try {
+                ms = Long.parseLong(v.trim());
+            } catch (final NumberFormatException e) {
+                throw new IllegalArgumentException(name + " is not an integer: " + v.trim());
+            }
+            if (ms < min || ms > max) {
+                throw new IllegalArgumentException(name + " must be " + min + ".." + max + " ms: " + ms);
+            }
+            return ms;
+        }
+    }
+
     /** A size {@code <n>}, {@code <n>k}, {@code <n>m} or {@code <n>g}. */
     static long size(final String name, final String text) {
         try {

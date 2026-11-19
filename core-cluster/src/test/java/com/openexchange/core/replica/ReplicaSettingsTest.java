@@ -534,6 +534,46 @@ public class ReplicaSettingsTest {
     }
 
     /**
+     * {@code TRANSPORT_DRIVER_CLIENT_LIVENESS_MS} and {@code TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS}: the members'
+     * names, parser and refusal texts; the values reach the replica's embedded driver context, so the replica and the
+     * members run with the same client timeouts.
+     */
+    @Test
+    public void driverClientTimeoutsAreTheMembersSettings() {
+        final String live = "TRANSPORT_DRIVER_CLIENT_LIVENESS_MS";
+        final String unblock = "TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS";
+        final ReplicaSettings defaults = with();
+        assertEquals(5_000, defaults.config().driverClientLivenessMs());
+        assertEquals(10_000, defaults.config().driverPublicationUnblockMs());
+
+        final ReplicaSettings set = with(live, "7000", unblock, "21000");
+        assertEquals(7_000, set.numeric(ReplicaSettings.Key.valueOf(live)));
+        assertEquals(21_000, set.numeric(ReplicaSettings.Key.valueOf(unblock)));
+        assertEquals(7_000, set.config().driverClientLivenessMs());
+        assertEquals(21_000, set.config().driverPublicationUnblockMs());
+        final io.aeron.driver.MediaDriver.Context driver =
+                com.openexchange.cluster.replica.ReplicaContexts.driver(set.config());
+        assertEquals(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(7_000), driver.clientLivenessTimeoutNs());
+        assertEquals(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(21_000), driver.publicationUnblockTimeoutNs());
+
+        // both ends of each range
+        assertEquals(1_000, with(live, "1000").config().driverClientLivenessMs());
+        assertEquals(1_200_000, with(live, "600000", unblock, "1200000").config().driverPublicationUnblockMs());
+        assertEquals(2_000, with(live, "1000", unblock, "2000").config().driverPublicationUnblockMs());
+
+        // the members' refusal texts behind the replica prefix
+        assertEquals(live + " must be 1000..600000 ms: 999", refusal(live, "999"));
+        assertEquals(live + " must be 1000..600000 ms: 600001", refusal(live, "600001"));
+        assertEquals(live + " is not an integer: 5s", refusal(live, "5s"));
+        assertEquals(unblock + " must be 2000..1200000 ms: 1999", refusal(unblock, "1999"));
+        assertEquals(unblock + " must be 2000..1200000 ms: 1200001", refusal(unblock, "1200001"));
+        assertEquals(unblock + " 5000 must exceed " + live + " 5000 (Aeron refuses the driver otherwise)",
+                refusal(unblock, "5000"));
+        assertEquals(unblock + " 10000 must exceed " + live + " 10000 (Aeron refuses the driver otherwise)",
+                refusal(live, "10000"));
+    }
+
+    /**
      * The live oracle's settings: each at its boundaries with the kit's refusal text behind the boot guard prefix, the
      * non-integer text, the defaults, the readiness age cross-check (only when the member cadence is set) and the
      * mismatch dir boot check.

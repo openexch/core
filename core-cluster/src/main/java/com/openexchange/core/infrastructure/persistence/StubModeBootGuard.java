@@ -111,11 +111,12 @@ public final class StubModeBootGuard {
     }
 
     /**
-     * What guard row 6 accepted: the log channel settings, the embedded driver directory bound and the archive segment
-     * length.
+     * What guard row 6 accepted: the log channel settings, the embedded driver directory bound, the archive segment
+     * length and the embedded driver's client timeouts.
      */
     public record Transport(com.openexchange.core.infrastructure.TransportConfig.LogTransport log, long driverDirActiveMs,
-                            com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment archiveSegment) {
+                            com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment archiveSegment,
+                            com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts driverTimeouts) {
     }
 
     /** Guard row 6 over this process's environment and the real kernel. */
@@ -147,6 +148,8 @@ public final class StubModeBootGuard {
             final long activeMs = com.openexchange.core.infrastructure.TransportConfig.driverDirActiveMs(env);
             final com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment segment =
                     com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment.parse(env);
+            final com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts timeouts =
+                    com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts.parse(env);
             if (!probeOff) {
                 final com.openexchange.cluster.SocketBufferProbe.Request rcv =
                         new com.openexchange.cluster.SocketBufferProbe.Request(
@@ -174,7 +177,8 @@ public final class StubModeBootGuard {
             }
             System.out.println("[BOOT-GUARD] " + segment.line(log.termLengthText()) + " (" + segment.length()
                     + " B; a log purge removes whole segments)");
-            return new Transport(log, activeMs, segment);
+            System.out.println("[BOOT-GUARD] " + timeouts.line());
+            return new Transport(log, activeMs, segment, timeouts);
         } catch (final IllegalArgumentException bad) {
             final StandbySnapshotBootGuard.Refused refused = new StandbySnapshotBootGuard.Refused(bad.getMessage(), bad);
             System.err.println(refused.getMessage());
