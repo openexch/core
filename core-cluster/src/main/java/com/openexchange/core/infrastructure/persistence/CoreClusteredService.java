@@ -894,8 +894,9 @@ public final class CoreClusteredService implements ClusteredService {
                         cluster.aeron().countersReader(),
                         clusterId,
                         readiness::ready)
-                        // Same as the matching engine: computed on the leader after
-                        // every snapshot and logged, not yet applied to the purge.
+                        // The retention floor (same as the matching engine): the purge never
+                        // passes a position another member may still need (RETENTION_FLOOR,
+                        // default apply; report only logs it).
                         .reportWatermark(
                                 com.openexchange.cluster.ClusterMemberPositions.from(
                                         cluster.aeron(), cluster.context()),

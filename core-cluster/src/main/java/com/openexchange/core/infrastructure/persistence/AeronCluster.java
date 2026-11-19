@@ -170,7 +170,7 @@ public final class AeronCluster {
             launchWithExternalDriver(clusterConfig, nodeId, lifecycle, journalRuntime, orderJournalRuntime, feedRuntime);
         } else {
             launchWithEmbeddedDriver(clusterConfig, lifecycle, journalRuntime, orderJournalRuntime, feedRuntime,
-                    transport.driverDirActiveMs());
+                    transport.driverDirActiveMs(), transport.driverTimeouts());
         }
     }
 
@@ -239,16 +239,15 @@ public final class AeronCluster {
             final com.openexchange.core.infrastructure.journal.MoneyJournalRuntime journalRuntime,
             final com.openexchange.core.infrastructure.journal.OrderJournalRuntime orderJournalRuntime,
             final com.openexchange.core.infrastructure.feed.BalanceFeedRuntime feedRuntime,
-            final long driverDirActiveMs) {
+            final long driverDirActiveMs,
+            final TransportConfig.DriverTimeouts driverTimeouts) {
         try (
                 ClusteredMediaDriver ignored = watchQuorum(lifecycle, launchEmbeddedDriver(clusterConfig,
                         driverDirActiveMs, () -> ClusteredMediaDriver.launch(
-                        com.openexchange.cluster.EmbeddedDriverDir.guard(clusterConfig.mediaDriverContext(),
-                                        driverDirActiveMs)
+                        embeddedDriverTimeouts(com.openexchange.cluster.EmbeddedDriverDir.guard(
+                                        clusterConfig.mediaDriverContext(), driverDirActiveMs), driverTimeouts)
                                 .dirDeleteOnShutdown(true)
                                 .timerIntervalNs(TimeUnit.MICROSECONDS.toNanos(500))
-                                .clientLivenessTimeoutNs(TimeUnit.SECONDS.toNanos(5))
-                                .publicationUnblockTimeoutNs(TimeUnit.SECONDS.toNanos(10))
                                 .socketSndbufLength(4 * 1024 * 1024)
                                 .socketRcvbufLength(4 * 1024 * 1024)
                                 .initialWindowLength(4 * 1024 * 1024)
@@ -276,6 +275,18 @@ public final class AeronCluster {
                         clusterConfig.clusteredServiceContext().terminationHook(lifecycle::onClusterTermination))) {
             lifecycle.awaitStop();
         }
+    }
+
+    /**
+     * The embedded driver's client liveness and publication unblock timeouts from their settings
+     * ({@code TRANSPORT_DRIVER_CLIENT_LIVENESS_MS}, {@code TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS}). The liveness is
+     * also the longest whole-process pause a member survives: past it the member's own clients close themselves.
+     */
+    static io.aeron.driver.MediaDriver.Context embeddedDriverTimeouts(final io.aeron.driver.MediaDriver.Context context,
+                                                                      final TransportConfig.DriverTimeouts timeouts) {
+        return context
+                .clientLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(timeouts.clientLivenessMs()))
+                .publicationUnblockTimeoutNs(TimeUnit.MILLISECONDS.toNanos(timeouts.publicationUnblockMs()));
     }
 
     /**

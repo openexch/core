@@ -84,6 +84,8 @@ The main engine settings:
 | `TRANSPORT_LOG_SO_RCVBUF`, `TRANSPORT_LOG_SO_SNDBUF` | `16m` | the log channel's socket buffers (64k..1g); `SO_RCVBUF` below the window refuses the boot |
 | `ARCHIVE_SEGMENT_LENGTH` | max(64m, `TRANSPORT_LOG_TERM_LENGTH`), logged at boot | the archive's segment file length (members and the replica). A log purge removes whole segments only, so a log keeps up to one segment below the floor; a small box or a test fixture sets it down (the docker fixture runs 1m) so its logs actually purge. A power of two in [64k, 1g] and at least `TRANSPORT_LOG_TERM_LENGTH` (Aeron would raise the log's segments to the term silently); anything else refuses the boot. The boot guard's line names it: `[BOOT-GUARD] archive segment 1m set (1048576 B; ...)`. `-Daeron.archive.segment.file.length` is not read: the core sets the length explicitly |
 | `CORE_DRIVER_DIR_ACTIVE_MS` | `10000` | embedded mode: a driver directory whose heartbeat is at most this old belongs to a live driver and refuses the boot (2000..600000); external mode ignores it |
+| `TRANSPORT_DRIVER_CLIENT_LIVENESS_MS` | `5000` | embedded mode: the member driver's client liveness timeout (1000..600000). It is also the longest whole-process pause (a frozen VM, a stopped container) a member survives: after a longer stall the member's own Aeron clients close themselves and the member exits 1 for a supervised restart. External mode takes `aeron.client.liveness.timeout` from the aeronmd's properties instead |
+| `TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS` | `10000` | embedded mode: the member driver's publication unblock timeout (2000..1200000); it must exceed `TRANSPORT_DRIVER_CLIENT_LIVENESS_MS` or the boot refuses (Aeron's rule). External mode: `aeron.publication.unblock.timeout` |
 | `BALANCE_FEED_CHANNEL`, `BALANCE_FEED_STREAM_ID` | unset (off) | optional balance update side channel |
 | `CORE_LEADER_HEARTBEAT_INTERVAL_MS` | `100` | how often the leader sends a heartbeat |
 | `CORE_LEADER_HEARTBEAT_TIMEOUT_MS` | `1000` | how long followers wait without a heartbeat before they start an election; at least 3 x the interval |
@@ -93,6 +95,21 @@ The main engine settings:
 The log channel's socket buffers are probed at boot in both driver modes: when the kernel grants less than `TRANSPORT_LOG_SO_RCVBUF` / `TRANSPORT_LOG_SO_SNDBUF`, the member exits 1 with `CORE BOOT GUARD:` naming `net.core.rmem_max` / `net.core.wmem_max`, the current and the needed value. Every member host needs `net.core.rmem_max` and `net.core.wmem_max` >= 16777216 with the defaults (`sysctl -w`, persisted in `/etc/sysctl.d`). In external mode the URI's `rcv-wnd`, `so-rcvbuf` and `so-sndbuf` override the aeronmd's own defaults for the log image. A restart within `CORE_DRIVER_DIR_ACTIVE_MS` of a kill of the member's own embedded driver refuses until the bound passes: the process manager's restart delay must cover it.
 
 The three timing settings decide the leaderless window after a leader dies (about heartbeat timeout plus one election) and how often load or a GC pause on a healthy leader is taken for a death. No client is acked before a quorum commits and applies its command, so a failover never loses an acked command; during the window ingress is refused and clients retry with their request id. Every member of a cluster must use the same values.
+
+### Log retention and catch-up
+
+The pruner and the cluster watchdogs come from cluster-kit; the core arms them on every member in both driver modes, with no setting of its own. A value outside its range refuses the boot. The retention floor applies when `SNAPSHOT_PRUNE_ENABLED` is on (the default). Details in cluster-kit's README ("Log retention and a member that was away", "Rejoin and peer reachability").
+
+| variable | default | meaning |
+|---|---|---|
+| `RETENTION_FLOOR` | `apply` | `apply`: a member never purges log that another member may still need (the leader holds its purge at the lowest member position, a follower at the leader's log start). `report` only logs the floor |
+| `RETENTION_MEMBER_WAIT_MS` | `1800000` | how long the floor waits for a member that does not move before the purge goes on without it (1000..604800000) |
+| `RETENTION_MEMBER_WAIT_BYTES` | `2147483648` | how far behind the newest snapshot a member may fall before the floor stops waiting for it (1048576..1099511627776) |
+| `RETENTION_PROBE_TIMEOUT_MS` | `5000` | bound on one read of the leader's log start from the leader's archive (100..60000) |
+| `ENGINE_CATCHUP_REFUSALS` | `3` | failed catch-up attempts in a row after which a member reads the leader's log start; a member below it exits 1 (1..1000) |
+| `ENGINE_CATCHUP_REFUSAL_WAIT_MS` | `30000` | the time bound next to the count: catch-up failing this long triggers the same check (1000..3600000) |
+| `ENGINE_REJOIN_PEER_WINDOW_MS` | `10000` | how long a gap in the evidence of a reachable quorum is bridged before the rejoin watchdog's clock is cleared (1000..600000); keep it at or above the driver's publication connection timeout. `ENGINE_REJOIN_WAIT_MS` must exceed it or the boot refuses |
+| `ENGINE_LEADER_ELECT_WAIT_MS` | `300000` | how long a leader elect may stay in LEADER_LOG_REPLICATION or LEADER_READY (Aeron gives these no timeout) while a quorum of members is reachable before it exits 1 for a supervised restart (10000..3600000); must exceed `ENGINE_REJOIN_PEER_WINDOW_MS` |
 
 Settings renamed from earlier releases (for example `ASSETS_ROLE` to `CORE_ROLE`, `AE_AUTH_CREDENTIAL` to `CORE_AUTH_CREDENTIAL`, `BRIDGE_AE_PORT_BASE` to `BRIDGE_CORE_PORT_BASE`, `RCS_MODE` to `SNAPSHOT_MODE`) are refused: a process that still sees an old name, as a variable, property or flag, exits 1 and names the new one. The table is `core-common/src/main/java/com/openexchange/core/config/RetiredSettings.java`.
 
@@ -188,6 +205,7 @@ The leader's archive is never a pull source while it leads (`shadow_pull_source_
 | `SHADOW_REBOOTSTRAP_KEEP` | `2` | moved-aside `cluster.rebootstrap-*` dirs kept (1..100) |
 | `SHADOW_REBOOTSTRAP_NOT_TAKEN_LOG_MS` | `60000` | at most one `re-bootstrap not taken` line per interval (1000..86400000) |
 | `REPLICA_DRIVER_DIR_ACTIVE_MS` | `10000` | embedded driver only: an existing `AERON_DIR` whose driver heartbeat is at most this old belongs to a live driver, and the replica refuses to start instead of taking over an aeronmd (2000..600000); a crashed driver's directory counts as stale only after this long |
+| `TRANSPORT_DRIVER_CLIENT_LIVENESS_MS`, `TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS` | `5000`, `10000` | embedded driver only: the members' client liveness and publication unblock timeouts, with the same ranges and the same rule (unblock above liveness), apply to the replica's driver too |
 
 The remaining `REPLICA_*` settings (backup timeouts, catch-up buffers, driver MTU and term length, stream ids) are listed with their ranges in `core-cluster/src/main/java/com/openexchange/core/replica/ReplicaSettings.java`. After a normal restart the replica reports 503 `unverified continuation` until it has compared its state with the next member snapshot, about one member snapshot interval.
 

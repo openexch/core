@@ -178,6 +178,12 @@ public final class OrderEngine {
     // Node-local counters
     private long releaseMintedUpToCount;
     private long releaseMintedOrderCount;
+    /**
+     * Release mints that replaced an entry still at stage RELEASE: its seq left the index unconfirmed and is never
+     * re-offered. Counted in the apply path like the minted counters, so equal on every member that applied the same
+     * log; node-local and not snapshotted like them.
+     */
+    private long releaseSupersededCount;
     private long releaseConfirmedCount;
     private long releaseConfirmStaleCount;
     private long releaseAbandonedCount;
@@ -1754,6 +1760,8 @@ public final class OrderEngine {
             }
             if (b.stage != ReleaseBacklog.STAGE_RELEASE) {
                 backlog.setStage(b, ReleaseBacklog.STAGE_RELEASE);
+            } else {
+                releaseSupersededCount++;
             }
         } else {
             b = backlog.insert(h);
@@ -2481,6 +2489,7 @@ public final class OrderEngine {
     public boolean capacityHigh() { return capacityHigh; }
     public long releaseMintedUpToCount() { return releaseMintedUpToCount; }
     public long releaseMintedOrderCount() { return releaseMintedOrderCount; }
+    public long releaseSupersededCount() { return releaseSupersededCount; }
     public long releaseConfirmedCount() { return releaseConfirmedCount; }
     public long releaseConfirmStaleCount() { return releaseConfirmStaleCount; }
     public long releaseAbandonedCount() { return releaseAbandonedCount; }

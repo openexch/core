@@ -96,6 +96,10 @@ public final class ReplicaSettings {
          * driver's, refused (10000, Aeron's driver timeout). A crashed driver's directory is stale only after this.
          */
         REPLICA_DRIVER_DIR_ACTIVE_MS("replica.driver.dir.active.ms"),
+        /** The embedded driver's client liveness timeout: the members' setting, parser and refusal texts (5000). */
+        TRANSPORT_DRIVER_CLIENT_LIVENESS_MS("transport.driver.client.liveness.ms"),
+        /** The embedded driver's publication unblock timeout, above the liveness: the members' setting (10000). */
+        TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS("transport.driver.publication.unblock.ms"),
         REPLICA_SHADOW_BUFFER_MB("replica.shadow.buffer.mb"),
         REPLICA_ALIGNED_WAIT_MS("replica.aligned.wait.ms"),
         /** The members' standby schedule; read here only to derive the two defaults below. */
@@ -322,6 +326,11 @@ public final class ReplicaSettings {
                 1024 * 1024 * 1024, true);
         checked(Key.REPLICA_DRIVER_DIR_ACTIVE_MS, ReplicaConfig.DEFAULT_DRIVER_DIR_ACTIVE_MS,
                 ReplicaConfig::driverDirActiveRefusal);
+        // the members' parser and refusal texts: the replica's embedded driver runs with the members' client timeouts
+        final com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts clientTimeouts =
+                com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts.parse(name -> raw(Key.valueOf(name)));
+        numbers.put(Key.TRANSPORT_DRIVER_CLIENT_LIVENESS_MS, clientTimeouts.clientLivenessMs());
+        numbers.put(Key.TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS, clientTimeouts.publicationUnblockMs());
         integer(Key.REPLICA_SHADOW_BUFFER_MB, ReplicaConfig.DEFAULT_SHADOW_BUFFER_MB, 16,
                 ReplicaConfig.MAX_SHADOW_BUFFER_MB);
         integer(Key.REPLICA_ALIGNED_WAIT_MS, ReplicaConfig.DEFAULT_ALIGNED_WAIT_MS, 1000, 3_600_000L);
@@ -699,6 +708,8 @@ public final class ReplicaSettings {
                 .driverMtu(intOf(Key.REPLICA_DRIVER_MTU))
                 .driverTermLength(intOf(Key.REPLICA_DRIVER_TERM_LENGTH))
                 .driverDirActiveMs(numeric(Key.REPLICA_DRIVER_DIR_ACTIVE_MS))
+                .driverClientLivenessMs(numeric(Key.TRANSPORT_DRIVER_CLIENT_LIVENESS_MS))
+                .driverPublicationUnblockMs(numeric(Key.TRANSPORT_DRIVER_PUBLICATION_UNBLOCK_MS))
                 .archiveSegmentLength(intOf(Key.ARCHIVE_SEGMENT_LENGTH))
                 .catchupRcvWnd(catchupRcvWnd)
                 .shadowBufferMb(intOf(Key.REPLICA_SHADOW_BUFFER_MB))

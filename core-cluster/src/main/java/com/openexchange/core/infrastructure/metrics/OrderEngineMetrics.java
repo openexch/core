@@ -113,6 +113,9 @@ public final class OrderEngineMetrics implements Consumer<CoreMetricsBody> {
         // Counters (3.10 item 3 table)
          .counter("core_release_minted_up_to_total", "UP_TO releases minted (M1-M10)", v::releaseMintedUpTo)
          .counter("core_release_minted_order_total", "ORDER releases minted (M11, M12)", v::releaseMintedOrder)
+         .counter("core_release_superseded_total",
+                 "Release mints that replaced a pending release; its seq left the index and is never re-offered",
+                 v::releaseSuperseded)
          .counter("core_release_confirmed_total", "Release backlog entries dropped by a dominating confirmation (C1, C2)",
                  v::releaseConfirmed)
          .counter("core_release_confirm_stale_total", "Release confirmations that dominated nothing (C3)", v::releaseConfirmStale)
