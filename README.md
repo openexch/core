@@ -106,10 +106,12 @@ The pruner and the cluster watchdogs come from cluster-kit; the core arms them o
 | `RETENTION_MEMBER_WAIT_MS` | `1800000` | how long the floor waits for a member that does not move before the purge goes on without it (1000..604800000) |
 | `RETENTION_MEMBER_WAIT_BYTES` | `2147483648` | how far behind the newest snapshot a member may fall before the floor stops waiting for it (1048576..1099511627776) |
 | `RETENTION_PROBE_TIMEOUT_MS` | `5000` | bound on one read of the leader's log start from the leader's archive (100..60000) |
+| `RETENTION_RECHECK_MAX_MS` | `60000` | longest wait between re-checks of a retention floor that stopped the last purge pass; a floor that rose is purged behind at once, without a new snapshot (1000..3600000) |
 | `ENGINE_CATCHUP_REFUSALS` | `3` | failed catch-up attempts in a row after which a member reads the leader's log start; a member below it exits 1 (1..1000) |
 | `ENGINE_CATCHUP_REFUSAL_WAIT_MS` | `30000` | the time bound next to the count: catch-up failing this long triggers the same check (1000..3600000) |
 | `ENGINE_REJOIN_PEER_WINDOW_MS` | `10000` | how long a gap in the evidence of a reachable quorum is bridged before the rejoin watchdog's clock is cleared (1000..600000); keep it at or above the driver's publication connection timeout. `ENGINE_REJOIN_WAIT_MS` must exceed it or the boot refuses |
 | `ENGINE_LEADER_ELECT_WAIT_MS` | `300000` | how long a leader elect may stay in LEADER_LOG_REPLICATION or LEADER_READY (Aeron gives these no timeout) while a quorum of members is reachable before it exits 1 for a supervised restart (10000..3600000); must exceed `ENGINE_REJOIN_PEER_WINDOW_MS` |
+| `ENGINE_REJOIN_PROBE_TERM_LENGTH` | `65536` | term length in bytes of the rejoin watchdog's idle peer probe publications, opened sparse on their own term instead of the consensus channel's (a power of two, 65536..1073741824) |
 
 Settings renamed from earlier releases (for example `ASSETS_ROLE` to `CORE_ROLE`, `AE_AUTH_CREDENTIAL` to `CORE_AUTH_CREDENTIAL`, `BRIDGE_AE_PORT_BASE` to `BRIDGE_CORE_PORT_BASE`, `RCS_MODE` to `SNAPSHOT_MODE`) are refused: a process that still sees an old name, as a variable, property or flag, exits 1 and names the new one. The table is `core-common/src/main/java/com/openexchange/core/config/RetiredSettings.java`.
 
@@ -172,6 +174,9 @@ In `SNAPSHOT_MODE=shadow` one follower per term (the member after the leader in 
 | `SHADOW_PRODUCER_SERIALIZE_ESTIMATE_MS` | `1000` | serialize time assumed before the first one (1..600000) |
 | `SHADOW_PRODUCER_RATE_WINDOW_MS` | `10000` | ingress rate horizon (1000..3600000) |
 | `SHADOW_WITNESS_ALARM_MS` | `7200000` | how long the newest ALIGNED may have fewer than two producers before the floor-side CRITICAL (1000..604800000) |
+| `SHADOW_LEADER_REMOTE_FLOOR` | `true` | while a member leads it purges its log behind VERIFIED ALIGNED shadows the other members attest they hold (it never pulls); `false`: a leader's log grows while it leads |
+| `SHADOW_LEADER_REMOTE_HOLDERS` | `1` | how many other members must attest a floor before the leader purges behind it (1..64) |
+| `SHADOW_LEADER_REMOTE_MAX_AGE_MS` | `30000` | a listing of the other members' attestations older than this feeds nothing (1000..3600000) |
 
 The leader's archive is never a pull source while it leads (`shadow_pull_source_skipped_leader_total`); a `SHADOW_PULL_SOURCES` entry that names a member's archive endpoint under another spelling than `CLUSTER_ADDRESSES` refuses the boot. Metrics: `shadow_producer_designated` (1, 0, -1 leader unknown), `shadow_producer_written_total`, `shadow_producer_serialize_total`, `shadow_producer_serialize_ms_last`, `shadow_producer_last_position`, `shadow_producer_skipped_total{reason}`, `shadow_producer_deferred_window_total`, `shadow_producer_aborted_leader_total`, `shadow_producer_leader_mismatch_total`, `shadow_producer_serialize_failed_total`, `shadow_crashed_writes_purged_total`, `shadow_floor_witness_missing{kind}`, `shadow_pull_source_skipped_leader_total`. The floor-side line `no two-producer anchor for <n> min ... missing kind <R|F>` is raised by every follower; a leader does not evaluate it.
 

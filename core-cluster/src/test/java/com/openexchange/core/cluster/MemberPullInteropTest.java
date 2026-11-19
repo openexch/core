@@ -81,12 +81,15 @@ public class MemberPullInteropTest {
                 r.rig.await(() -> ServiceProbe.pull(m.service, "shadow_pull_total") >= 2, 2 * PERIOD_MS + 30_000,
                         () -> "member " + m.id + " never pulled the replica's ALIGNED at " + p2);
             }
-            // the control: behind the replica alone, the any-verified follower purges below P_cm2
-            RestoreDrillDryRun.nc("any-verified anchor", "log purged below P_cm behind one producer", () -> {
-                r.rig.await(() -> r.rig.logStart(f2) > 0, 60_000, "the control never purged");
-                assertNoPurgeBehindOneProducer(r, f2, p2);
-            });
+            // behind the replica alone the any-verified follower attests its one witness, and still purges nothing:
+            // a follower never purges past its leader's log start, and the two-producers leader takes no floor from
+            // one producer
+            r.rig.await(() -> ServiceProbe.housekeeping(f2.service, "shadow_attested_anchor_position") == p2, 60_000,
+                    () -> "member " + f2.id + " (any-verified) never attested its anchor at P_cm2=" + p2 + ": "
+                            + ServiceProbe.housekeeping(f2.service, "shadow_attested_anchor_position"));
             r.rig.pumpMs(3 * PERIOD_MS);
+            assertEquals("the two-producers leader purges nothing behind one producer", 0, r.rig.logStart(leader));
+            assertNoPurgeBehindOneProducer(r, f2, p2);
             assertNoPurgeBehindOneProducer(r, f1, p2);
 
             // the second producer's copy appears on the peer f2 (built from f1's unpurged log: one committed log);

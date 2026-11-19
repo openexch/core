@@ -918,6 +918,14 @@ public final class CoreClusteredService implements ClusteredService {
                     final io.aeron.cluster.ConsensusModule.Context cctx = consensusContext;
                     if (snapshotMode == SnapshotMode.SHADOW && cctx != null && cctx.clusterMembers() != null) {
                         final int members = io.aeron.cluster.ClusterMember.parse(cctx.clusterMembers()).length;
+                        // the attestation every member publishes, and the floor a leader purges behind while it
+                        // holds no shadow of its own (it never pulls): SHADOW_LEADER_REMOTE_FLOOR
+                        final java.util.Map<String, Integer> memberOfArchive = new java.util.HashMap<>();
+                        for (final io.aeron.cluster.ClusterMember cm
+                                : io.aeron.cluster.ClusterMember.parse(cctx.clusterMembers())) {
+                            memberOfArchive.put(cm.archiveEndpoint(), cm.id());
+                        }
+                        shadowHousekeeping.leaderRemoteFloor(cctx.clusterMemberId(), memberOfArchive);
                         shadowHousekeeping.producer(new MemberShadowHousekeeping.ProducerWiring(cctx.clusterMemberId(),
                                 members,
                                 shadowProducer::onWriteResult, shadowFaults.writerFactory, shadowFaults.sweepOff,

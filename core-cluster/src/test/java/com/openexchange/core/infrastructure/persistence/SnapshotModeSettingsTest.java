@@ -30,6 +30,8 @@ public class SnapshotModeSettingsTest {
             new Range(SnapshotModeSettings.Key.CONSENSUS_SNAPSHOT_MAX_BYTES, 4096, 1_073_741_824L),
             new Range(SnapshotModeSettings.Key.SHADOW_LOAD_TIMEOUT_MS, 1000, 86_400_000L),
             new Range(SnapshotModeSettings.Key.SHADOW_WITNESS_ALARM_MS, 1000, 604_800_000L),
+            new Range(SnapshotModeSettings.Key.SHADOW_LEADER_REMOTE_HOLDERS, 1, 64),
+            new Range(SnapshotModeSettings.Key.SHADOW_LEADER_REMOTE_MAX_AGE_MS, 1000, 3_600_000L),
     };
 
     private static SnapshotModeSettings parse(final String mode, final SnapshotModeSettings.Key key, final String value) {
@@ -49,6 +51,8 @@ public class SnapshotModeSettingsTest {
             case CONSENSUS_SNAPSHOT_MAX_BYTES -> s.consensusSnapshotMaxBytes();
             case SHADOW_LOAD_TIMEOUT_MS -> s.loadTimeoutMs();
             case SHADOW_WITNESS_ALARM_MS -> s.witnessAlarmMs();
+            case SHADOW_LEADER_REMOTE_HOLDERS -> s.leaderRemoteHolders();
+            case SHADOW_LEADER_REMOTE_MAX_AGE_MS -> s.leaderRemoteMaxAgeMs();
             default -> throw new IllegalArgumentException(key.name());
         };
     }
