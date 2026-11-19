@@ -50,6 +50,7 @@ public class OrderEngineMetricsTest {
         "core_order_leg_regressions_total", "core_order_quarantined", "core_feed_duplicate_unverified_total",
         "core_feed_duplicate_mismatch_total", "core_feed_cursor", "core_feed_latch_reason", "core_order_entry_gate_reasons",
         "core_feed_lanes_behind", "core_release_minted_up_to_total", "core_release_minted_order_total",
+        "core_release_superseded_total",
         "core_release_confirmed_total", "core_release_confirm_stale_total", "core_release_abandoned_total",
         "core_release_skipped_total", "core_me_leg_live_total", "core_me_leg_live_duplicate_total", "core_orphan_cancel_total",
         "core_backlog_parked_total", "core_released_late_total", "core_me_invalid_total", "core_me_release_early_total",
@@ -76,6 +77,7 @@ public class OrderEngineMetricsTest {
         }
         assertEquals(oe.releaseMintedUpToCount(), (long) m.get("core_release_minted_up_to_total"));
         assertEquals(oe.releaseMintedOrderCount(), (long) m.get("core_release_minted_order_total"));
+        assertEquals(oe.releaseSupersededCount(), (long) m.get("core_release_superseded_total"));
         assertEquals(oe.legLiveCount(), (long) m.get("core_me_leg_live_total"));
         assertEquals(oe.orphanCancelCount(), (long) m.get("core_orphan_cancel_total"));
         assertEquals(oe.parkedCount(), (long) m.get("core_backlog_parked_total"));

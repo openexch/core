@@ -61,6 +61,7 @@ public final class CoreMetricsView {
     // Counters
     public long releaseMintedUpTo() { return o().releaseMintedUpToCount(); }
     public long releaseMintedOrder() { return o().releaseMintedOrderCount(); }
+    public long releaseSuperseded() { return o().releaseSupersededCount(); }
     public long releaseConfirmed() { return o().releaseConfirmedCount(); }
     public long releaseConfirmStale() { return o().releaseConfirmStaleCount(); }
     public long releaseAbandoned() { return o().releaseAbandonedCount(); }
