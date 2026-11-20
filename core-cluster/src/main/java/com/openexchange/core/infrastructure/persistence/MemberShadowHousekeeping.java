@@ -62,6 +62,15 @@ import java.util.function.LongSupplier;
  * (through retention), and under {@code two-producers} the floor-side {@link WitnessAlarm} raises its CRITICAL line on
  * every member when the newest ALIGNED position has had fewer than two producers for longer than its window.
  * {@link #close} closes the writer thread (aborting a write in flight) before the archive clients.</p>
+ *
+ * <p>The leader's remote floor ({@link #leaderRemoteFloor}, shadow mode with {@code SHADOW_PULL_SOURCES} and
+ * {@code SHADOW_LEADER_REMOTE_FLOOR}): every member's kit {@code FloorAttestor} publishes, after each scan, what its
+ * archive holds VERIFIED (one marker recording, its alias the content); while this node LEADS the kit's
+ * {@code RemoteFloor} lists the other members' markers over their archive control channels (no pull, no replay, nothing
+ * recorded here: D15 stands) and the floor purges behind {@code max(local floor, remote floor)}. A leader that purged
+ * so and restarts has a stub, a log that starts above 0 and no shadow: {@link ShadowRestore} rule 3b pulls one before
+ * anything is restored, and halts with the 7.3 text when no source answers (virtual genesis is refused on a log that
+ * does not start at 0).</p>
  */
 final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
 
@@ -122,6 +131,11 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
     private com.openexchange.cluster.shadow.CrashedWriteSweep sweep;
     private volatile com.openexchange.cluster.shadow.WitnessAlarm witnessAlarm;
     private ShadowFloor.NewestImage peekedKind = ShadowFloor.NewestImage.UNKNOWN;
+    /** This member's id for the attestation and the remote floor; -1: neither is wired. */
+    private volatile int remoteFloorMemberId = -1;
+    /** {@code host:port} of each member's archive endpoint to its member id (a marker is bound to its source). */
+    private volatile java.util.Map<String, Integer> memberOfArchive = java.util.Map.of();
+    private com.openexchange.cluster.shadow.RemoteFloor remoteFloor;
 
     /**
      * @param genesisId the engine's recorded genesis nonce as the service last published it (0 before ADOPT)
@@ -175,6 +189,21 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
             witnessAlarm = new com.openexchange.cluster.shadow.WitnessAlarm(
                     TimeUnit.MILLISECONDS.toNanos(settings.witnessAlarmMs()));
         }
+        return this;
+    }
+
+    /**
+     * Wires the attestation and the leader's remote floor for cluster member {@code memberId} (before the pruner
+     * starts). Effective in shadow mode with {@code SHADOW_LEADER_REMOTE_FLOOR=true}; the listing also needs
+     * {@code SHADOW_PULL_SOURCES} (without sources a leader keeps its local floor, as before).
+     *
+     * @param memberOfArchive each member's archive endpoint ({@code host:port}, as the members table spells it) to its
+     *                        member id: a listed marker counts only when it names the member whose archive it is in
+     */
+    MemberShadowHousekeeping leaderRemoteFloor(final int memberId,
+                                               final java.util.Map<String, Integer> memberOfArchive) {
+        this.remoteFloorMemberId = memberId;
+        this.memberOfArchive = java.util.Map.copyOf(memberOfArchive);
         return this;
     }
 
@@ -364,6 +393,39 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
         }
         housekeeping = new ShadowHousekeeping(catalog, retention, floor, clock, settings.scanPeriodMs(),
                 settings.deepReadPaceMs(), this::refreshJournal, counters);
+        final int memberId = remoteFloorMemberId;
+        final boolean attests = memberId >= 0 && settings.mode() == SnapshotMode.SHADOW
+                && settings.leaderRemoteFloor();
+        if (!attests) {
+            // no attestor in this process (the remote floor off, or a mode without shadows): a marker an earlier
+            // process left must not stand as this one's statement; an archive refusal fails the wake and is retried
+            final int stale = com.openexchange.cluster.shadow.FloorAttestor.retractAll(archive,
+                    CoreLogApplier.ENGINE_ID_CORE);
+            if (stale > 0) {
+                System.out.println("[SHADOW-ATTEST] retracted " + stale + " marker(s) of an earlier process: this"
+                        + " process attests nothing (SNAPSHOT_MODE=" + settings.mode().text()
+                        + ", SHADOW_LEADER_REMOTE_FLOOR=" + settings.leaderRemoteFloor() + ")");
+            }
+        }
+        if (attests) {
+            housekeeping.attestor(new com.openexchange.cluster.shadow.FloorAttestor(archive,
+                    CoreLogApplier.ENGINE_ID_CORE, clusterId, genesis, memberId,
+                    settings.anchorRule() == ShadowFloor.AnchorRule.TWO_PRODUCERS ? 2 : 1, clock, timeoutNs, counters));
+            if (pullSettings.enabled() && remoteFloor == null) {
+                remoteFloor = new com.openexchange.cluster.shadow.RemoteFloor(archive.context().aeron(),
+                        CoreLogApplier.ENGINE_ID_CORE, clusterId, genesisId, memberId, pullSettings.sources(),
+                        memberOfArchive, pullSettings.responseEndpoint() != null ? pullSettings.responseEndpoint().udpChannel()
+                                : "aeron:udp?endpoint=" + responseHost + ":0",
+                        pullSettings.periodMs(), settings.leaderRemoteMaxAgeMs(), settings.leaderRemoteHolders(),
+                        clock, counters);
+                floor.leaderRemote(leaderNow, remoteFloor);
+                System.out.println("[SHADOW-FLOOR] leader remote floor armed: member=" + memberId + " sources="
+                        + pullSettings.sources() + " members=" + new java.util.TreeMap<>(memberOfArchive)
+                        + " holders=" + settings.leaderRemoteHolders() + " maxAgeMs="
+                        + settings.leaderRemoteMaxAgeMs() + " (while this node leads it purges behind VERIFIED"
+                        + " ALIGNED shadows the other members attest; it never pulls)");
+            }
+        }
         System.out.println("[SHADOW-HK] housekeeping armed: archive=" + catalog.archiveId() + " genesisId=" + genesis
                 + " retainN=" + settings.retainN() + " margin=" + settings.floorMargin().text() + " anchorRule="
                 + settings.anchorRule().text() + " scanPeriodMs="
@@ -592,6 +654,7 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
         CloseHelper.quietClose(retention);
         retention = null;
         housekeeping = null;
+        CloseHelper.quietClose(remoteFloor); // the listing clients; the floor then reads no view (NO_VIEW: local only)
         CloseHelper.quietClose(archive);
         archive = null;
     }

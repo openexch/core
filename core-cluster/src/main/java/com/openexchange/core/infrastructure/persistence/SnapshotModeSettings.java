@@ -49,7 +49,10 @@ public final class SnapshotModeSettings {
         SHADOW_PRODUCER_WINDOW_BUDGET_PCT("shadow.producer.window.budget.pct", "50"),
         SHADOW_PRODUCER_SERIALIZE_ESTIMATE_MS("shadow.producer.serialize.estimate.ms", "1000"),
         SHADOW_PRODUCER_RATE_WINDOW_MS("shadow.producer.rate.window.ms", "10000"),
-        SHADOW_WITNESS_ALARM_MS("shadow.witness.alarm.ms", "7200000");
+        SHADOW_WITNESS_ALARM_MS("shadow.witness.alarm.ms", "7200000"),
+        SHADOW_LEADER_REMOTE_FLOOR("shadow.leader.remote.floor", "true"),
+        SHADOW_LEADER_REMOTE_HOLDERS("shadow.leader.remote.holders", "1"),
+        SHADOW_LEADER_REMOTE_MAX_AGE_MS("shadow.leader.remote.max.age.ms", "30000");
 
         private final String property;
         private final String defaultText;
@@ -97,6 +100,9 @@ public final class SnapshotModeSettings {
     /** True when {@code SHADOW_PRODUCER} was set (the off-mode CRITICAL line names an explicit value only). */
     private final boolean producerExplicit;
     private final long witnessAlarmMs;
+    private final boolean leaderRemoteFloor;
+    private final int leaderRemoteHolders;
+    private final long leaderRemoteMaxAgeMs;
 
     private SnapshotModeSettings(final Source source) {
         this.mode = SnapshotMode.parse(raw(source, Key.SNAPSHOT_MODE));
@@ -117,6 +123,9 @@ public final class SnapshotModeSettings {
         this.producerSettings = com.openexchange.cluster.shadow.ShadowProducerSettings.parse(pullEnv);
         this.producerExplicit = source.get(Key.SHADOW_PRODUCER.name(), Key.SHADOW_PRODUCER.property()) != null;
         this.witnessAlarmMs = range(source, Key.SHADOW_WITNESS_ALARM_MS, 1000, 604_800_000L);
+        this.leaderRemoteFloor = bool(source, Key.SHADOW_LEADER_REMOTE_FLOOR);
+        this.leaderRemoteHolders = (int)range(source, Key.SHADOW_LEADER_REMOTE_HOLDERS, 1, 64);
+        this.leaderRemoteMaxAgeMs = range(source, Key.SHADOW_LEADER_REMOTE_MAX_AGE_MS, 1000, 3_600_000L);
     }
 
     /** The settings of this process. @throws IllegalArgumentException with the 3.5 text of the first bad setting */
@@ -246,6 +255,34 @@ public final class SnapshotModeSettings {
     }
 
     /**
+     * {@code SHADOW_LEADER_REMOTE_FLOOR} (default true): while this member LEADS in shadow mode it purges its log
+     * behind VERIFIED ALIGNED shadows the other members attest they hold (it never pulls and never produces, so it
+     * holds none of its own), under {@code SHADOW_ANCHOR_RULE} and {@code SHADOW_FLOOR_MARGIN}; every member publishes
+     * its attestation. {@code false}: a leader purges behind its own shadows only (its log grows while it leads) and
+     * no attestation is written. Needs {@code SHADOW_PULL_SOURCES}: the sources are the archives listed, and what a
+     * restarted old leader pulls its shadow from.
+     */
+    public boolean leaderRemoteFloor() {
+        return leaderRemoteFloor;
+    }
+
+    /**
+     * {@code SHADOW_LEADER_REMOTE_HOLDERS} (default 1, 1..64): how many other members must attest a floor before the
+     * leader purges behind it.
+     */
+    public int leaderRemoteHolders() {
+        return leaderRemoteHolders;
+    }
+
+    /**
+     * {@code SHADOW_LEADER_REMOTE_MAX_AGE_MS} (default 30000, 1000..3600000): a listing of the other members'
+     * attestations older than this feeds nothing (the sources stopped answering).
+     */
+    public long leaderRemoteMaxAgeMs() {
+        return leaderRemoteMaxAgeMs;
+    }
+
+    /**
      * The CRITICAL lines a member prints at boot: the anchor rule's opt-out, the disabled puller, a kinds widening,
      * {@code SHADOW_PRODUCER=none} in shadow mode, an explicit {@code SHADOW_PRODUCER=designated-follower} in off mode.
      */
@@ -274,6 +311,8 @@ public final class SnapshotModeSettings {
                 + consensusSnapshotMaxBytes + " loadTimeoutMs=" + loadTimeoutMs + " floorEnabled=" + floorEnabled
                 + " producer=" + producerSettings.mode().text() + " producerBufferMb=" + producerSettings.bufferMb()
                 + " windowBudgetPct=" + producerSettings.windowBudgetPct() + " serializeEstimateMs="
-                + producerSettings.serializeEstimateMs() + " witnessAlarmMs=" + witnessAlarmMs;
+                + producerSettings.serializeEstimateMs() + " witnessAlarmMs=" + witnessAlarmMs
+                + " leaderRemoteFloor=" + leaderRemoteFloor + " leaderRemoteHolders=" + leaderRemoteHolders
+                + " leaderRemoteMaxAgeMs=" + leaderRemoteMaxAgeMs;
     }
 }
