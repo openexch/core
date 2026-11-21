@@ -28,7 +28,7 @@ import static org.junit.Assert.assertTrue;
  *   <li>Two snapshots, ONE producer's ALIGNED at each on a follower's archive (pulled by the other follower): no
  *       member attests, and the leader's log start stays 0 for several periods (one producer never anchors the
  *       leader either).</li>
- *   <li>A second producer's ALIGNED arrives at both positions (later, C2): the followers attest
+ *   <li>A second producer's ALIGNED arrives at both positions (later): the followers attest
  *       ({@code shadow_attested_anchor_position}), the leader's listing sees it, and the leader's log start moves
  *       past 0 while it still leads, with {@code shadow_pull_total 0} and {@code shadow_pull_started_total 0} on it
  *       (D15: it listed, it never pulled) and no shadow recording in its archive.</li>
