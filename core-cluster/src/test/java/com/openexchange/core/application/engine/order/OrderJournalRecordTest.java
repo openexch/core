@@ -520,7 +520,7 @@ public class OrderJournalRecordTest {
                     }
                 }
             }
-            // C10 from the journal's view: every live order's last record carries its hold, and locked is their sum
+            // Holds from the journal's view: every live order's last record carries its hold, and locked is their sum
             final Map<String, Long> sum = new HashMap<>();
             engine.orders().orders().forEachByOrderId(o -> {
                 final long hold = after.getOrDefault(o.orderId, 0L);
