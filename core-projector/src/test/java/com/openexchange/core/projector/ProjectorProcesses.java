@@ -150,6 +150,17 @@ final class ProjectorProcesses implements AutoCloseable {
         run(root.resolve("migrate.log"), psql(pgPort, name, "-v", "ON_ERROR_STOP=1", "-f", migration.toString()));
     }
 
+    /** Applies the packaged migration {@code file} (under /db/migration) to the "core" database as user core. */
+    void migrate(final String file) throws Exception {
+        final Path root = dir("projector-pg-migrate-");
+        final Path migration = root.resolve(file);
+        try (var in = ProjectorProcesses.class.getResourceAsStream("/db/migration/" + file)) {
+            assertTrue(file + " on the classpath", in != null);
+            Files.copy(in, migration);
+        }
+        run(root.resolve("migrate.log"), psql(pgPort, "core", "-v", "ON_ERROR_STOP=1", "-f", migration.toString()));
+    }
+
     /** The JDBC URL of database {@code name} on the throwaway cluster (user core, trust auth). */
     String jdbcUrl(final String name) {
         return "jdbc:postgresql://127.0.0.1:" + pgPort + "/" + name;
