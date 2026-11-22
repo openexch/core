@@ -13,10 +13,12 @@ import com.openexchange.core.infrastructure.generated.MessageHeaderEncoder;
 import com.openexchange.core.infrastructure.generated.QueryFeedPositionEncoder;
 import com.openexchange.core.infrastructure.generated.RequestBalanceSnapshotEncoder;
 import com.openexchange.core.infrastructure.generated.RequestHoldSnapshotEncoder;
+import io.aeron.CommonContext;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.EgressListener;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.exceptions.DriverTimeoutException;
 import io.aeron.logbuffer.Header;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
@@ -24,9 +26,12 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 
+import java.io.File;
+import java.io.PrintStream;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
 
 /**
  * CoreDump: a one-shot, READ-ONLY snapshot of the core ledger, printed as a single JSON
@@ -46,8 +51,13 @@ import java.util.concurrent.ThreadLocalRandom;
  * </pre>
  *
  * <p>Exit codes: {@code 0} = snapshot printed; {@code 3} = the 30 s overall snapshot deadline
- * elapsed before all three responses arrived (e.g. no core leader). Diagnostics go to stderr only,
- * so stdout is always clean JSON for the consumer to parse.</p>
+ * elapsed before all three responses arrived (e.g. no core leader); {@code 1} = the start was refused
+ * before any request was sent (a missing or invalid {@code COREDUMP_DRIVER_MODE} / {@code AERON_DIR}, or
+ * no active external media driver at {@code AERON_DIR}). Diagnostics go to stderr only, so stdout is
+ * always clean JSON for the consumer to parse.</p>
+ *
+ * <p>The media driver is chosen by {@link CoreDumpDriver}: embedded (its own driver in a per-pid
+ * {@code /dev/shm} directory, deleted on exit) or external (the aeronmd at {@code AERON_DIR}).</p>
  *
  * <p>Invoked as {@code java -jar core-bridge.jar dump} (dispatched by {@link BridgeMain}).</p>
  */
@@ -56,6 +66,7 @@ public final class CoreDump {
     private static final long OVERALL_TIMEOUT_MS = 30_000;
     private static final int EXIT_OK = 0;
     private static final int EXIT_TIMEOUT = 3;
+    static final int EXIT_REFUSED = 1;
 
     private CoreDump() {
     }
@@ -65,26 +76,56 @@ public final class CoreDump {
         System.exit(run(args));
     }
 
-    /** @return process exit code (0 ok, 3 timeout). Prints the JSON snapshot to stdout on success. */
+    /** @return process exit code (0 ok, 1 refused start, 3 timeout). Prints the JSON snapshot to stdout on success. */
     public static int run(final String[] args) {
-        final BridgeConfig config = BridgeConfig.fromEnv();
+        final CoreDumpDriver driverChoice;
+        try {
+            driverChoice = CoreDumpDriver.fromEnv();
+        } catch (final IllegalArgumentException e) {
+            System.err.println("CoreDump: refusing to start: " + e.getMessage());
+            return EXIT_REFUSED;
+        }
+        return run(driverChoice, BridgeConfig.fromEnv(), MediaDriver::launch, System.out);
+    }
+
+    /**
+     * The dump on an already chosen driver. {@code launcher} starts the embedded driver; it is a parameter so a
+     * test can see whether one was started (it never is in external mode).
+     */
+    static int run(final CoreDumpDriver driverChoice, final BridgeConfig config,
+                   final Function<MediaDriver.Context, MediaDriver> launcher, final PrintStream out) {
         final SnapshotCollector collector = new SnapshotCollector();
 
-        // Own embedded media driver (SHARED, backoff-idle by nature) in its own /dev/shm dir, so
-        // CoreDump can run alongside the bridge/OMS without touching their drivers.
-        final MediaDriver driver = MediaDriver.launch(new MediaDriver.Context()
-                .aeronDirectoryName("/dev/shm/aeron-aedump-" + ProcessHandle.current().pid())
-                .threadingMode(ThreadingMode.SHARED)
-                .dirDeleteOnStart(true)
-                .dirDeleteOnShutdown(true)
-                .errorHandler(t -> t.printStackTrace(System.err)));
+        final MediaDriver driver;
+        final String aeronDir;
+        if (driverChoice.mode == CoreDumpDriver.Mode.EXTERNAL) {
+            // Attach to the box's aeronmd; launch nothing. A one-shot tool does not wait for a driver to come up:
+            // no active driver at AERON_DIR refuses the start at once (not a snapshot timeout).
+            if (!externalDriverActive(driverChoice.aeronDir)) {
+                System.err.println("CoreDump: refusing to start: no active media driver at "
+                        + CoreDumpDriver.AERON_DIR_ENV + "=" + driverChoice.aeronDir);
+                return EXIT_REFUSED;
+            }
+            driver = null;
+            aeronDir = driverChoice.aeronDir;
+        } else {
+            // Own embedded media driver (SHARED, backoff-idle by nature) in its own /dev/shm dir, so
+            // CoreDump can run alongside the bridge/OMS without touching their drivers.
+            driver = launcher.apply(new MediaDriver.Context()
+                    .aeronDirectoryName("/dev/shm/aeron-aedump-" + ProcessHandle.current().pid())
+                    .threadingMode(ThreadingMode.SHARED)
+                    .dirDeleteOnStart(true)
+                    .dirDeleteOnShutdown(true)
+                    .errorHandler(t -> t.printStackTrace(System.err)));
+            aeronDir = driver.aeronDirectoryName();
+        }
 
         AeronCluster cluster = null;
         try {
             cluster = AeronCluster.connect(new AeronCluster.Context()
                     .credentialsSupplier(toolCredentials().supplier())
                     .messageTimeoutNs(java.util.concurrent.TimeUnit.SECONDS.toNanos(8))
-                    .aeronDirectoryName(driver.aeronDirectoryName())
+                    .aeronDirectoryName(aeronDir)
                     .ingressChannel("aeron:udp?term-length=4m")
                     .ingressEndpoints(CoreFeedClient.ingressEndpoints(config.coreClusterAddresses, config.corePortBase))
                     // Ephemeral egress port (never collides with bridge 9394 / OMS 9393). Host is
@@ -107,7 +148,7 @@ public final class CoreDump {
                 final int work = cluster.pollEgress();
                 idle.idle(work);
             }
-            System.out.println(collector.toJson());
+            out.println(collector.toJson());
             return EXIT_OK;
         } catch (final io.aeron.exceptions.TimeoutException | IllegalStateException e) {
             // No leader reachable / could not send or complete the snapshot within budget: a
@@ -117,6 +158,15 @@ public final class CoreDump {
         } finally {
             CloseHelper.quietClose(cluster);
             CloseHelper.quietClose(driver);
+        }
+    }
+
+    /** True when the driver at {@code dir} has a cnc.dat with a fresh heartbeat (a dead driver's file is not enough). */
+    private static boolean externalDriverActive(final String dir) {
+        try {
+            return CommonContext.isDriverActive(new File(dir), new CommonContext().driverTimeoutMs(), ignored -> { });
+        } catch (final DriverTimeoutException e) {
+            return false; // cnc.dat created but not initialised yet
         }
     }
 
