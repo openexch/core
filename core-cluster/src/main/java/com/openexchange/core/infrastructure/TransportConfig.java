@@ -5,6 +5,7 @@ import io.aeron.CommonContext;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.BusySpinIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.SleepingMillisIdleStrategy;
 
 import java.util.function.Supplier;
 
@@ -15,13 +16,15 @@ import java.util.function.Supplier;
  * <p><b>Default idle mode is BACKOFF, not busy-spin</b> — the opposite of the matching engine's
  * default. The core co-resides with the live matching engine on one box; a busy-spin core would peg cores
  * and starve the money stack. Backoff parks when idle. A future dedicated deployment opts into
- * {@code TRANSPORT_IDLE_MODE=busy_spin}.</p>
+ * {@code TRANSPORT_IDLE_MODE=busy_spin}. A small host (a demo box with a few vCPUs) sets
+ * {@code TRANSPORT_IDLE_MODE=sleep}: every agent sleeps 1 ms when idle, the same strategy as the matching engine's
+ * {@code sleep}, trading up to 1 ms of wake-up latency for near-zero idle CPU.</p>
  */
 public final class TransportConfig {
 
     public enum DriverMode { EXTERNAL, EMBEDDED }
 
-    public enum IdleMode { BUSY_SPIN, BACKOFF }
+    public enum IdleMode { BUSY_SPIN, BACKOFF, SLEEP }
 
     private TransportConfig() {
     }
@@ -44,15 +47,20 @@ public final class TransportConfig {
             return IdleMode.valueOf(value.trim().toUpperCase());
         } catch (final IllegalArgumentException e) {
             throw new IllegalArgumentException(
-                    "Invalid TRANSPORT_IDLE_MODE/transport.idle.mode '" + value + "' (expected busy_spin|backoff)");
+                    "Invalid TRANSPORT_IDLE_MODE/transport.idle.mode '" + value + "' (expected busy_spin|backoff|sleep)");
         }
     }
 
     /** Supplier of idle strategies matching {@link #idleMode()} (each Aeron agent needs its own). */
     public static Supplier<IdleStrategy> idleStrategySupplier() {
-        return idleMode() == IdleMode.BUSY_SPIN
-                ? BusySpinIdleStrategy::new
-                : BackoffIdleStrategy::new;
+        switch (idleMode()) {
+            case BUSY_SPIN:
+                return BusySpinIdleStrategy::new;
+            case SLEEP:
+                return () -> new SleepingMillisIdleStrategy(1);
+            default:
+                return BackoffIdleStrategy::new;
+        }
     }
 
     /**
