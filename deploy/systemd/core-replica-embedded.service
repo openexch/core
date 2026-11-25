@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The core replica, embedded media driver (dev and demo only). The same env files as core-replica.service; the two
+# units conflict.
+
+[Unit]
+Description=Open Exchange core replica (embedded media driver)
+Documentation=https://github.com/openexch/core/tree/main/deploy
+After=network-online.target
+Wants=network-online.target
+Conflicts=core-replica.service
+# The restart backoff paces a crash loop; a burst counter would park the unit for good.
+StartLimitIntervalSec=0
+
+[Service]
+Environment=BASE_DIR=/var/lib/openexchange/core-replica
+EnvironmentFile=/etc/openexchange/core/cluster.env
+EnvironmentFile=/etc/openexchange/core-replica/replica.env
+EnvironmentFile=-/etc/openexchange/core-replica/host.env
+EnvironmentFile=/etc/openexchange/core-replica/secrets.env
+StateDirectory=openexchange/core-replica
+StateDirectoryMode=0750
+Type=simple
+User=openexchange
+Group=openexchange
+ExecStart=/opt/openexchange/core/bin/core-launch replica embedded
+Restart=on-failure
+RestartSec=2s
+RestartSteps=6
+RestartMaxDelaySec=60s
+RestartPreventExitStatus=78
+SuccessExitStatus=143
+TimeoutStopSec=30s
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

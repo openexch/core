@@ -104,11 +104,18 @@ final class StubStory implements AutoCloseable {
         rig.forgetAll();
         final byte[][] last = new byte[1][];
         rig.await(() -> {
-            final byte[] a = ServiceProbe.image(m.service);
-            rig.pumpMs(200);
-            final byte[] b = ServiceProbe.image(m.service);
-            last[0] = b;
-            return Arrays.equals(a, b);
+            try {
+                final byte[] a = ServiceProbe.image(m.service);
+                rig.pumpMs(200);
+                final byte[] b = ServiceProbe.image(m.service);
+                last[0] = b;
+                return Arrays.equals(a, b);
+            } catch (final IllegalStateException sessionsStillClosing) {
+                // The probe reads the engine from the test thread. While the service thread is still closing
+                // the forgotten sessions, the session map's iterator can observe a removal and throw. That is
+                // "not at rest yet", so read again.
+                return false;
+            }
         }, 30_000, "the image never came to rest");
         return last[0];
     }
