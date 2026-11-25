@@ -3,6 +3,7 @@ package com.openexchange.core.infrastructure.persistence;
 
 import com.openexchange.core.application.engine.CoreEngine;
 import com.openexchange.core.domain.commands.CoreConfigCommand;
+import com.openexchange.cluster.SnapshotLayouts;
 import com.openexchange.cluster.shadow.ShadowIdentitySource;
 
 import java.util.Objects;
@@ -19,21 +20,28 @@ import java.util.Objects;
  *       ({@code ShadowIdentity.requireProducible}).</li>
  *   <li>{@link #journalEnabled}, {@link #journalSeq}: the REPLICATED money-journal arming and its dense seq, never the
  *       node-local sink.</li>
- *   <li>{@link #payloadLayoutHint}: 6, the v6 snapshot layout ({@code BalanceSnapshotCodec.LAYOUT_V6_TAG = -6}
- * ); diagnostic only.</li>
+ *   <li>{@link #payloadLayoutHint}: the version of the snapshot layout the recorded behaviour writes
+ *       ({@code BalanceSnapshotCodec.LAYOUTS}), so members on different builds write the same hint; diagnostic only.</li>
  * </ul>
  * No clock, environment, role or {@code Cluster} reaches it (the applier closure scan covers it).
  */
 public final class CoreShadowIdentity implements ShadowIdentitySource {
 
-    /** The snapshot layout the applier's image carries (v6). */
+    /** The v6 snapshot layout's number. */
     public static final int PAYLOAD_LAYOUT_V6 = 6;
 
     private final CoreEngine engine;
+    private final SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts;
 
     /** @param engine the applier's {@code engine()} */
     public CoreShadowIdentity(final CoreEngine engine) {
+        this(engine, BalanceSnapshotCodec.LAYOUTS);
+    }
+
+    /** @param layouts the layouts of the build that serializes the image */
+    public CoreShadowIdentity(final CoreEngine engine, final SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts) {
         this.engine = Objects.requireNonNull(engine, "engine");
+        this.layouts = Objects.requireNonNull(layouts, "layouts");
     }
 
     @Override
@@ -54,6 +62,6 @@ public final class CoreShadowIdentity implements ShadowIdentitySource {
 
     @Override
     public int payloadLayoutHint() {
-        return PAYLOAD_LAYOUT_V6;
+        return layouts.writtenBy(engine.coreConfig().behaviorVersion()).version();
     }
 }

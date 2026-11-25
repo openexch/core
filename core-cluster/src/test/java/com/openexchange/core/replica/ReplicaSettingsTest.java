@@ -70,11 +70,10 @@ public class ReplicaSettingsTest {
 
     private static final Range[] RANGES = {
             new Range("TRANSPORT_EXTERNAL_DRIVER_TIMEOUT_MS", 1, 86_400_000L),
-            new Range("CLUSTER_PORT_BASE", 1, 65_530),
+            new Range("CLUSTER_PORT_BASE", 1, 65_529),
             new Range("CLUSTER_PORT_STRIDE", 0, 10_000, new String[] {"CLUSTER_REPLICA_SLOT", "1"}),
             new Range("CLUSTER_REPLICA_SLOT", 0, 1000),
             new Range("CLUSTER_ID", 0, Integer.MAX_VALUE),
-            new Range("CORE_NODE_PORT", 1, 65_535),
             new Range("REPLICA_MEMBER_BACKUP_WINDOW_MS", 1000, 3_600_000L,
                     new String[] {"REPLICA_VERIFY_WAIT_MS", Long.toString(ReplicaSettings.MAX_VERIFY_WAIT_MS)}),
             new Range("REPLICA_BACKUP_COOLDOWN_MS", 100, 3_600_000L,
@@ -187,7 +186,8 @@ public class ReplicaSettingsTest {
         assertEquals(9300, s.numeric(ReplicaSettings.Key.CLUSTER_PORT_BASE));
         assertEquals(0, s.numeric(ReplicaSettings.Key.CLUSTER_PORT_STRIDE));
         assertEquals(3, s.slot());
-        assertEquals("node port 9700 + slot", 9703, s.nodePort());
+        assertEquals("node port: base + slot x stride 0 + 6, the members' port", 9306, s.nodePort());
+        assertEquals("consensus term 1m default", s.config().consensusChannel().line());
         assertEquals(ClusterBackup.SourceType.FOLLOWER, s.sourceType());
         assertEquals(11_000, s.numeric(ReplicaSettings.Key.REPLICA_MEMBER_BACKUP_WINDOW_MS));
         assertEquals("cool-down = window + 1000", 12_000, s.numeric(ReplicaSettings.Key.REPLICA_BACKUP_COOLDOWN_MS));
@@ -264,6 +264,28 @@ public class ReplicaSettingsTest {
         assertEquals("ARCHIVE_SEGMENT_LENGTH 2g outside [64k, 1g]", refusal("ARCHIVE_SEGMENT_LENGTH", "2g"));
     }
 
+    /** The probe port follows the members' rule; CORE_NODE_PORT may repeat it and is refused otherwise. */
+    @Test
+    public void theNodePortIsTheMembersRuleAndAnOverrideMustAgree() {
+        assertEquals(9606, with("CLUSTER_REPLICA_SLOT", "3", "CLUSTER_PORT_STRIDE", "100").nodePort());
+        assertEquals(9606, with("CLUSTER_PORT_STRIDE", "100", "CORE_NODE_PORT", "9606").nodePort());
+        assertEquals("CORE_NODE_PORT=9703 disagrees with the node endpoint port 9306 (port base 9300 + node 3 x stride 0"
+                        + " + 6); unset it, or fix the port base or CLUSTER_PORT_STRIDE",
+                refusal("CORE_NODE_PORT", "9703"));
+        assertEquals("CORE_NODE_PORT=x is not a number", refusal("CORE_NODE_PORT", "x"));
+    }
+
+    /** The replica publishes consensus on the members' term setting, through the kit's one parser. */
+    @Test
+    public void theConsensusTermIsTheMembersSetting() {
+        assertEquals("aeron:udp?term-length=4m",
+                with("TRANSPORT_CONSENSUS_TERM_LENGTH", "4m").config().consensusChannel().uri());
+        assertEquals("TRANSPORT_CONSENSUS_TERM_LENGTH 3m is not a power of two",
+                refusal("TRANSPORT_CONSENSUS_TERM_LENGTH", "3m"));
+        assertEquals("TRANSPORT_CONSENSUS_TERM_LENGTH 'big' is not a size (expected <n>, <n>k, <n>m or <n>g)",
+                refusal("TRANSPORT_CONSENSUS_TERM_LENGTH", "big"));
+    }
+
     @Test
     public void derivedDefaultsFollowTheirSources() {
         final ReplicaSettings s = with("SNAPSHOT_STANDBY_INTERVAL_MINUTES", "20", "REPLICA_MEMBER_BACKUP_WINDOW_MS",
@@ -272,7 +294,7 @@ public class ReplicaSettingsTest {
         assertEquals(40L * 60_000, s.numeric(ReplicaSettings.Key.REPLICA_READY_SHADOW_AGE_MS));
         assertEquals(22_000, s.numeric(ReplicaSettings.Key.REPLICA_BACKUP_COOLDOWN_MS));
         assertEquals(16L * 1024 * 1024, s.numeric(ReplicaSettings.Key.REPLICA_READY_MAX_LAG_BYTES));
-        assertEquals(9707, s.nodePort());
+        assertEquals("stride 0: the slot moves no port", 9306, s.nodePort());
         // a derived value is capped at its setting's maximum, never refused for a value the operator did not write
         final ReplicaSettings day = with("SNAPSHOT_STANDBY_INTERVAL_MINUTES", "1440");
         assertEquals(1440, day.numeric(ReplicaSettings.Key.SHADOW_STANDBY_FALLBACK_MINUTES));
@@ -464,7 +486,7 @@ public class ReplicaSettingsTest {
                 "/dev/shm/aeron-ext", "BASE_DIR", "/var/lib/core-replica").config();
         assertEquals(ClusterBackup.SourceType.ANY, cfg.sourceType());
         assertEquals(4, cfg.slot());
-        assertEquals(9704, cfg.nodePort());
+        assertEquals(9306, cfg.nodePort());
         assertEquals(15_000, cfg.backupCooldownMs());
         assertEquals(30_000, cfg.backupQueryIntervalMs());
         assertEquals(11_000, cfg.memberBackupWindowMs());

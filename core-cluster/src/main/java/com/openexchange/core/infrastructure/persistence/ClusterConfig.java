@@ -177,6 +177,10 @@ public final class ClusterConfig {
                 .acceptStandbySnapshots(false)
                 .replicationChannel("aeron:udp?endpoint=" + hostname + ":0")
                 .snapshotChannel(snapshotChannel)
+                // TRANSPORT_CONSENSUS_TERM_LENGTH (default 1m): Aeron's default consensus channel names no term, so it
+                // took the driver's 16m (two publications and two images of 48 MB per member of three)
+                .consensusChannel(com.openexchange.cluster.ConsensusChannel.parse(
+                        com.openexchange.core.infrastructure.TransportConfig::settingFromEnv).uri())
                 .idleStrategySupplier(org.agrona.concurrent.BusySpinIdleStrategy::new)
                 .logFragmentLimit(64)
                 .wheelTickResolutionNs(1_000_000)
@@ -200,6 +204,9 @@ public final class ClusterConfig {
         consensusModuleContext.authorisationServiceSupplier(() -> authorisation);
 
         if (clusteredService instanceof CoreClusteredService engineService) {
+            // The probe port follows the member ports' rule; a CORE_NODE_PORT that disagrees refuses the boot here,
+            // before any Aeron component exists.
+            engineService.nodeEndpointPort(nodeEndpointPort(memberId, portBase));
             engineService.readinessConsensus(consensusModuleContext);
             engineService.sessionAuthorisation(authorisation);
         }
@@ -397,6 +404,24 @@ public final class ClusterConfig {
      */
     public static int calculatePort(final int nodeId, final int portBase, final int offset) {
         return com.openexchange.cluster.ClusterPorts.port(nodeId, portBase, offset);
+    }
+
+    /** {@code CORE_NODE_PORT} (env, then {@code core.node.port}): accepted only when it names the computed port. */
+    public static final String NODE_PORT_SETTING = "CORE_NODE_PORT";
+
+    /**
+     * The member's probe and metrics port: {@code portBase + nodeId x CLUSTER_PORT_STRIDE + 6} (kit
+     * {@code ClusterPorts.NODE_ENDPOINT_OFFSET}), the same on every host at the default stride. {@code CORE_NODE_PORT}
+     * may repeat it and nothing else.
+     *
+     * @throws IllegalArgumentException when {@code CORE_NODE_PORT} is not a number or names another port
+     */
+    public static int nodeEndpointPort(final int nodeId, final int portBase) {
+        String override = System.getenv(NODE_PORT_SETTING);
+        if (override == null || override.isBlank()) {
+            override = System.getProperty("core.node.port");
+        }
+        return com.openexchange.cluster.ClusterPorts.nodeEndpointPort(nodeId, portBase, NODE_PORT_SETTING, override);
     }
 
     private static String udpChannel(final int nodeId, final String hostname, final int portBase) {

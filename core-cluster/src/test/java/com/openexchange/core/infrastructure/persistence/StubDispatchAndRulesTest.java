@@ -58,8 +58,8 @@ public class StubDispatchAndRulesTest {
         final CoreClusteredService service = serviceWithRecorder(stops);
         final IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> service.restoreFromImage(image, length));
-        assertTrue(e.getMessage(), e.getMessage().contains("layout tag -4 refused")
-                && e.getMessage().contains("a shadow stub (-100)"));
+        assertTrue(e.getMessage(), e.getMessage().contains("layout v4 (tag -4) refused: older than the previous layout")
+                && e.getMessage().contains("a shadow stub carries tag -100"));
         assertEquals(1, stops[0]);
     }
 

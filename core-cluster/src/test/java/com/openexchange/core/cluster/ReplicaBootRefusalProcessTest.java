@@ -140,7 +140,6 @@ public class ReplicaBootRefusalProcessTest {
         // control: a writable dir passes the guard; the child goes on to launch (stopped here)
         final Map<String, String> ok = new HashMap<>(env);
         ok.put("REPLICA_MISMATCH_DIR", dir().resolve("writable-mismatch").toString());
-        ok.put("CORE_NODE_PORT", Integer.toString(ReplicaRig.freeTcp()));
         final ReplicaChild k = ReplicaChild.start(dir(), "mismatch-dir-control", ok, List.of("replica"));
         try {
             k.awaitLine("[REPLICA] starting", EXIT_MS);

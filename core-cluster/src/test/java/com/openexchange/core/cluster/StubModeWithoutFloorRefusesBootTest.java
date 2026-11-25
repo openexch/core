@@ -74,7 +74,9 @@ public class StubModeWithoutFloorRefusesBootTest {
         dirs.add(shm);
         final Path aeronDir = shm.resolve("aeron");
         final Path log = base.resolve("engine.log");
-        final int probePort = freePort();
+        final int portBase = freePort();
+        // the child's computed probe port (node 0, default stride): base + the kit's endpoint offset
+        final int probePort = portBase + com.openexchange.cluster.ClusterPorts.NODE_ENDPOINT_OFFSET;
         final List<String> cmd = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens=java.base/java.nio=ALL-UNNAMED",
                 "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED", "-Xmx512m", "-Daeron.threading.mode=SHARED",
@@ -96,7 +98,7 @@ public class StubModeWithoutFloorRefusesBootTest {
         e.put("TRANSPORT_SNAPSHOT_TERM_LENGTH", "4m");
         e.put("CLUSTER_NODE", "0");
         e.put("CLUSTER_ADDRESSES", "localhost");
-        e.put("CLUSTER_PORT_BASE", String.valueOf(freePort()));
+        e.put("CLUSTER_PORT_BASE", String.valueOf(portBase));
         e.put("CORE_NODE_PORT", String.valueOf(probePort));
         e.putAll(env);
         final Process p = pb.redirectErrorStream(true).redirectOutput(log.toFile()).start();

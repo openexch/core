@@ -16,6 +16,7 @@ import com.openexchange.core.application.engine.session.SessionAuthority;
 import com.openexchange.core.domain.Asset;
 import com.openexchange.core.domain.GateReason;
 import com.openexchange.core.domain.GateState;
+import com.openexchange.cluster.SnapshotLayouts;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
 
@@ -24,10 +25,17 @@ import org.agrona.MutableDirectBuffer;
  * dependency. An infrastructure adapter: it reads the {@link Account} aggregates through their public
  * accessors and writes bytes; the domain never knows about serialization.
  *
+ * <p><b>LAYOUTS.</b> The payload starts with a layout tag. {@link #LAYOUTS} is the set this build carries: it reads
+ * the current layout and the one before it, and refuses every other tag by name. The layout it WRITES is the one the
+ * engine's recorded behaviour version maps to, never a property of the jar, so members running different builds at
+ * one log position write identical bytes; a build that knows a newer layout keeps writing the older one until the
+ * behaviour switch that adopts the newer one is recorded. An image whose tag is not the one its own recorded
+ * behaviour writes is refused.</p>
+ *
  * <p><b>PAYLOAD v6 (the v5 layout plus section 13, the limits record, and section 14, the order-event replay
- * ring; the cutover is a clean genesis: the tag moved from -5 to -6 so a v5 image is refused):</b></p>
+ * ring; written from behaviour 1, the only layout this build carries; v4 and v5 are retired and refused):</b></p>
  * <pre>
- *   [layoutTag          : long]   // LAYOUT_V6_TAG (-6); anything else is refused
+ *   [layoutTag          : long]   // LAYOUT_V6_TAG (-6)
  *   [lastAppliedTradeId : long]
  *   [consumePosition    : long]
  *   [journalSeq         : long]
@@ -119,6 +127,49 @@ public final class BalanceSnapshotCodec {
     private static final int KNOWN_FLAGS = FLAG_JOURNAL_ENABLED;
     private static final int SECTION_HEADER = 2 + 4;
 
+    /** One payload layout: its writer and its reader. The tag is the first long of the payload. */
+    public interface Layout {
+        /** Write the engine's state at {@code offset}; returns the payload length. */
+        int write(CoreEngine engine, MutableDirectBuffer dst, int offset);
+
+        /** Decode a payload of this layout into a fresh {@code engine}. */
+        Decoded read(DirectBuffer src, int offset, int length, CoreEngine engine);
+
+        /** The image's eventSeq, without decoding the image. */
+        long peekEventSeq(DirectBuffer src, int payloadOffset, int payloadLength);
+    }
+
+    private static final Layout V6 = new Layout() {
+        @Override
+        public int write(final CoreEngine engine, final MutableDirectBuffer dst, final int offset) {
+            return serializeV6(engine, dst, offset);
+        }
+
+        @Override
+        public Decoded read(final DirectBuffer src, final int offset, final int length, final CoreEngine engine) {
+            return deserializeV6(src, offset, length, engine);
+        }
+
+        @Override
+        public long peekEventSeq(final DirectBuffer src, final int payloadOffset, final int payloadLength) {
+            if (payloadLength < EVENT_SEQ_OFFSET + 8) {
+                throw new IllegalStateException("balance snapshot payload too short for its eventSeq: " + payloadLength);
+            }
+            return src.getLong(payloadOffset + EVENT_SEQ_OFFSET);
+        }
+    };
+
+    /**
+     * The layouts this build carries. v6 is written from behaviour 1 on, so every behaviour this build runs writes
+     * v6. The next layout joins as the current one with the behaviour version that adopts it, and v6 becomes the
+     * previous one: read, and still written below that behaviour.
+     */
+    public static final SnapshotLayouts<Layout> LAYOUTS = SnapshotLayouts.<Layout>of("balance snapshot")
+            .current(6, LAYOUT_V6_TAG, 1L, V6)
+            .retired(5, LAYOUT_V5_TAG)
+            .retired(4, LAYOUT_V4_TAG)
+            .build();
+
     private BalanceSnapshotCodec() {
     }
 
@@ -159,6 +210,18 @@ public final class BalanceSnapshotCodec {
      * @return number of payload bytes written
      */
     public static int serialize(CoreEngine engine, MutableDirectBuffer dst, int offset) {
+        return serialize(LAYOUTS, engine, dst, offset);
+    }
+
+    /**
+     * {@link #serialize(CoreEngine, MutableDirectBuffer, int)} against a given set of layouts: the layout written is
+     * the one the engine's recorded behaviour version maps to.
+     */
+    public static int serialize(SnapshotLayouts<Layout> layouts, CoreEngine engine, MutableDirectBuffer dst, int offset) {
+        return layouts.writtenBy(engine.coreConfig().behaviorVersion()).codec().write(engine, dst, offset);
+    }
+
+    private static int serializeV6(CoreEngine engine, MutableDirectBuffer dst, int offset) {
         final int[] pos = {offset};
 
         dst.putLong(pos[0], LAYOUT_V6_TAG);
@@ -903,33 +966,55 @@ public final class BalanceSnapshotCodec {
      * payload before the engine is touched. Refuses a layout this build does not read.
      */
     public static long peekEventSeq(final DirectBuffer src, final int payloadOffset, final int payloadLength) {
-        if (payloadLength < EVENT_SEQ_OFFSET + 8) {
-            throw new IllegalStateException("balance snapshot payload too short for its eventSeq: " + payloadLength);
+        return peekEventSeq(LAYOUTS, src, payloadOffset, payloadLength);
+    }
+
+    /** {@link #peekEventSeq(DirectBuffer, int, int)} against a given set of layouts. */
+    public static long peekEventSeq(final SnapshotLayouts<Layout> layouts, final DirectBuffer src, final int payloadOffset,
+                                    final int payloadLength) {
+        return layouts.readerFor(layoutTag(src, payloadOffset, payloadLength)).codec()
+                .peekEventSeq(src, payloadOffset, payloadLength);
+    }
+
+    /** The payload's layout tag, its first long. */
+    public static long layoutTag(final DirectBuffer src, final int payloadOffset, final int payloadLength) {
+        if (payloadLength < 8) {
+            throw new IllegalStateException("balance snapshot payload too short for a layout tag: " + payloadLength);
         }
-        final long tag = src.getLong(payloadOffset);
-        if (tag != LAYOUT_V6_TAG) {
-            throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only v6");
-        }
-        return src.getLong(payloadOffset + EVENT_SEQ_OFFSET);
+        return src.getLong(payloadOffset);
     }
 
     /**
-     * Decode a v4 payload into {@code engine}, restoring its accounts, holds and scalars. The engine is
+     * Decode a payload into {@code engine}, restoring its accounts, holds and scalars. The engine is
      * assumed fresh (empty); recovery constructs a new engine and restores into it. Refuses, with
-     * {@link IllegalStateException}, any layout tag other than v4, unknown flag bits, unknown or
-     * out-of-order sections, and a section whose declared length does not match what it decodes to.
+     * {@link IllegalStateException}, a layout tag this build does not read (older than the previous layout, or
+     * unknown), unknown flag bits, unknown or out-of-order sections, a section whose declared length does not match
+     * what it decodes to, and an image whose layout is not the one its recorded behaviour writes.
      */
     public static Decoded deserialize(DirectBuffer src, int offset, int length, CoreEngine engine) {
+        return deserialize(LAYOUTS, src, offset, length, engine);
+    }
+
+    /** {@link #deserialize(DirectBuffer, int, int, CoreEngine)} against a given set of layouts. */
+    public static Decoded deserialize(SnapshotLayouts<Layout> layouts, DirectBuffer src, int offset, int length,
+                                      CoreEngine engine) {
+        final long tag = layoutTag(src, offset, length);
+        final Decoded decoded = layouts.readerFor(tag).codec().read(src, offset, length, engine);
+        // the behaviour version the image itself recorded decides which layout it had to be written in
+        layouts.requireWrittenBy(tag, engine.coreConfig().behaviorVersion());
+        return decoded;
+    }
+
+    private static Decoded deserializeV6(DirectBuffer src, int offset, int length, CoreEngine engine) {
         final int end = offset + length;
         int pos = offset;
         if (length < 8 + 7 * 8 + 1 + 4) {
-            throw new IllegalStateException("balance snapshot payload too short for the v4 layout: " + length);
+            throw new IllegalStateException("balance snapshot payload too short for the v6 layout: " + length);
         }
         final long tag = src.getLong(pos);
         pos += 8;
         if (tag != LAYOUT_V6_TAG) {
-            throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only v6 ("
-                    + LAYOUT_V6_TAG + "); older images are not restored (clean genesis)");
+            throw new IllegalStateException("balance snapshot layout tag " + tag + " handed to the v6 reader");
         }
         final long lastAppliedTradeId = src.getLong(pos);
         pos += 8;

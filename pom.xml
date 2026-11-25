@@ -36,7 +36,7 @@
         <!-- cluster-kit, Aeron and Agrona are pinned identical to the match engine so the two
              Aeron clusters share a substrate and one aeronmd can drive both. SBE is pinned
              independently of match. -->
-        <cluster-kit.version>0.1.32-runtime.20261120.untried.g6d83ddf</cluster-kit.version>
+        <cluster-kit.version>0.1.33-runtime.20261125.layoutsports.g9640d88</cluster-kit.version>
         <aeron.version>1.53.1</aeron.version>
         <agrona.version>2.6.0</agrona.version>
         <sbe.version>1.40.1</sbe.version>
@@ -45,13 +45,13 @@
         <postgresql.version>42.7.13</postgresql.version>
         <hikari.version>7.1.0</hikari.version>
         <slf4j.version>2.0.18</slf4j.version>
-        <!-- match repo (settlement-journal codecs consumed by core-bridge): an IMMUTABLE
+        <!-- match repo (ME cluster wire codecs consumed by core-loadgen): an IMMUTABLE
              1.0.<utcstamp>.g<sha> from GitHub Packages, deployed by match CI on every main push.
              The trailing g<sha> names the exact match commit these wire bytes came from.
              Bumped by match CI's consumer-bump PR (or by hand: pick any published version). -->
         <match.version>1.0.20261118090224.gd27e4b7</match.version>
         <!-- The ME journal schema 4 codecs (match 3e7d357) for the TEST-scope feed harness of
-             core-cluster only. Separate from match.version on purpose: the frozen core-bridge keeps schema 3. -->
+             core-cluster only. Separate from match.version: each pin moves with the module that reads it. -->
         <match.journal.version>1.0.20261113185451.g3e7d357</match.journal.version>
         <!-- Benchmark loadgen histograms (core-loadgen only; not in any engine hot path). -->
         <hdrhistogram.version>2.2.2</hdrhistogram.version>
@@ -79,9 +79,8 @@
                 <version>${project.version}</version>
             </dependency>
 
-            <!-- Cross-repo: match engine's shared kernel (settlement-journal SBE codecs, schema id=3),
-                 the same way order-management depends on com.match:match-common for its own cluster
-                 wire codecs. core-bridge is the only core module that pulls this in. -->
+            <!-- Cross-repo: match engine's shared kernel (the ME cluster wire codecs and the ME journal
+                 codecs, schema ids 1 and 4). core-loadgen and the core-cluster feed harness tests use it. -->
             <dependency>
                 <groupId>com.match</groupId>
                 <artifactId>match-common</artifactId>

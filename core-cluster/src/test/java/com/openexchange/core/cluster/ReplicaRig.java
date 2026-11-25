@@ -371,6 +371,12 @@ final class ReplicaRig implements AutoCloseable {
 
     // ---------------------------------------------------------------------------------------------- replica
 
+    /** A replica child's probe port: what {@code ReplicaSettings} computes for slot 3 at stride 100 on {@code portBase}. */
+    static int nodePort(final int portBase) {
+        return com.openexchange.cluster.ClusterPorts.port(SLOT, portBase,
+                com.openexchange.cluster.ClusterPorts.NODE_ENDPOINT_OFFSET, STRIDE);
+    }
+
     static int freeTcp() {
         try (ServerSocket s = new ServerSocket(0)) {
             return s.getLocalPort();

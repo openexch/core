@@ -39,7 +39,7 @@ jobs:
           java-version: 21
           cache: maven
 
-      # com.match:match-common (the ME settlement-journal SBE classes) resolves from
+      # com.match:match-common (the ME wire and ME journal SBE classes) resolves from
       # GitHub Packages at the version pinned in pom.xml: no more checking out match
       # at floating main and installing a mutable "1.0" into ~/.m2.
 
@@ -275,8 +275,8 @@ jobs:
       # Published under that prefix, as <name>/target/<name>.jar. The engine jar is
       # what the box deploys (members and the replica run it). The projector is the
       # only writer of the PostgreSQL history and deploys from the same prefix as the
-      # engine it projects, so a core roll fetches both by one ref. The bridge jar stays:
-      # its `dump` CLI is the money check's core dump. The load generator because a
+      # engine it projects, so a core roll fetches both by one ref. The core-bridge jar
+      # carries the client tools: its `dump` CLI is the money check's core dump. The load generator because a
       # published benchmark has to be re-runnable from the artifacts it was measured on.
       JARS: core-cluster core-projector core-bridge core-loadgen
     steps:

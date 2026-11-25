@@ -76,6 +76,8 @@ public final class ReplicaSettings {
         CLUSTER_ID("aeron.cluster.id"),
         CORE_AUTH_CREDENTIAL(CoreAuth.POLICY.credentialProperty()),
         CORE_NODE_PORT("core.node.port"),
+        /** The consensus channel's term, the members' setting and parser (kit {@code ConsensusChannel}, 1m). */
+        TRANSPORT_CONSENSUS_TERM_LENGTH(com.openexchange.cluster.ConsensusChannel.PROPERTY),
         REPLICA_BACKUP_SOURCE("replica.backup.source"),
         REPLICA_MEMBER_BACKUP_WINDOW_MS("replica.member.backup.window.ms"),
         REPLICA_BACKUP_COOLDOWN_MS("replica.backup.cooldown.ms"),
@@ -195,6 +197,7 @@ public final class ReplicaSettings {
     private ClusterBackup.SourceType sourceType;
     private List<String> memberHosts;
     private String replicaAddress;
+    private com.openexchange.cluster.ConsensusChannel consensusChannel;
     private String aeronDir;
     private File baseDir;
     private File mismatchDir;
@@ -281,7 +284,7 @@ public final class ReplicaSettings {
             throw new IllegalArgumentException("REPLICA_BACKUP_SOURCE=FOLLOWER needs >= 2 members; use ANY");
         }
 
-        final long base = integer(Key.CLUSTER_PORT_BASE, 9300, 1, 65_530);
+        final long base = integer(Key.CLUSTER_PORT_BASE, 9300, 1, 65_529); // base + 6 (the probe) fits 65535
         final long stride = integer(Key.CLUSTER_PORT_STRIDE, ClusterPorts.DEFAULT_STRIDE, 0, 10_000);
         final long slot = integer(Key.CLUSTER_REPLICA_SLOT, 3, 0, 1000);
         final long top = ClusterPorts.port((int)slot, (int)base, ClusterPorts.TRANSFER_OFFSET, (int)stride);
@@ -292,7 +295,12 @@ public final class ReplicaSettings {
         replicaAddress = resolveReplicaAddress();
         collision((int)base, (int)stride, (int)slot);
         integer(Key.CLUSTER_ID, 0, 0, Integer.MAX_VALUE);
-        integer(Key.CORE_NODE_PORT, 9700 + slot, 1, 65_535);
+        // The probe follows the members' rule (base + slot x stride + the kit's endpoint offset); CORE_NODE_PORT may
+        // only repeat that port, anything else refuses the boot.
+        numbers.put(Key.CORE_NODE_PORT, (long) ClusterPorts.nodeEndpointPort((int) slot, (int) base, (int) stride,
+                Key.CORE_NODE_PORT.name(), raw(Key.CORE_NODE_PORT)));
+        consensusChannel = com.openexchange.cluster.ConsensusChannel.parse(
+                n -> Key.TRANSPORT_CONSENSUS_TERM_LENGTH.name().equals(n) ? raw(Key.TRANSPORT_CONSENSUS_TERM_LENGTH) : null);
 
         final String dir = raw(Key.AERON_DIR);
         aeronDir = dir != null ? dir : CommonContext.getAeronDirectoryName() + "-core-replica" + slot + "-driver";
@@ -705,6 +713,7 @@ public final class ReplicaSettings {
                 .imageLivenessMs(numeric(Key.REPLICA_IMAGE_LIVENESS_MS))
                 .catchupRcvbuf(catchupRcvbuf)
                 .catchupSndbuf(catchupSndbuf)
+                .consensusChannel(consensusChannel)
                 .driverMtu(intOf(Key.REPLICA_DRIVER_MTU))
                 .driverTermLength(intOf(Key.REPLICA_DRIVER_TERM_LENGTH))
                 .driverDirActiveMs(numeric(Key.REPLICA_DRIVER_DIR_ACTIVE_MS))

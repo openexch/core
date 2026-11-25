@@ -74,6 +74,8 @@ public final class CoreScenarioRunner {
     // Pooled once and re-populated per INIT_HIGH_WATER call, mirroring the projector's pooled commands.
     private final InitTradeHighWaterCommand initHighWaterCommand = new InitTradeHighWaterCommand();
     private final SetMoneyJournalCommand setMoneyJournalCommand = new SetMoneyJournalCommand();
+    /** The snapshot layouts of the build this runner stands for; a test swaps in another build's set. */
+    private com.openexchange.cluster.SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts = BalanceSnapshotCodec.LAYOUTS;
 
     private CoreScenarioRunner() {
         this.engine = new CoreEngine();
@@ -96,6 +98,13 @@ public final class CoreScenarioRunner {
     /** Fresh runner — for tests that need to inspect engine state after running (conservation, codec). */
     static CoreScenarioRunner newRunner() {
         return new CoreScenarioRunner();
+    }
+
+    /** Run as another build: its snapshot layouts and the behaviour versions it supports. */
+    void useBuild(final com.openexchange.cluster.SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts,
+                  final int... supportedBehaviorVersions) {
+        this.layouts = layouts;
+        engine.coreConfig().setSupportedBehaviorVersions(supportedBehaviorVersions);
     }
 
     /** Execute all lines against this runner's engine (accumulating output). */
@@ -132,7 +141,7 @@ public final class CoreScenarioRunner {
      */
     byte[] snapshotBytes() {
         final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
-        final int payloadLength = BalanceSnapshotCodec.serialize(engine, buffer, SnapshotEnvelope.payloadOffset());
+        final int payloadLength = BalanceSnapshotCodec.serialize(layouts, engine, buffer, SnapshotEnvelope.payloadOffset());
         final int length = new SnapshotEnvelope().seal(buffer, payloadLength);
         final byte[] bytes = new byte[length];
         buffer.getBytes(0, bytes);
@@ -147,7 +156,7 @@ public final class CoreScenarioRunner {
         // the jar's supported behaviour set is node-local (the V3Genesis test seam); a restarted node keeps its own
         fresh.coreConfig().setSupportedBehaviorVersions(engine.coreConfig().supportedBehaviorVersions());
         final BalanceSnapshotCodec.Decoded decoded =
-                BalanceSnapshotCodec.deserialize(buffer, SnapshotEnvelope.payloadOffset(), payloadLength, fresh);
+                BalanceSnapshotCodec.deserialize(layouts, buffer, SnapshotEnvelope.payloadOffset(), payloadLength, fresh);
         if (decoded.bytesConsumed != payloadLength) {
             throw new IllegalStateException("snapshot payload length mismatch: " + decoded.bytesConsumed
                     + " consumed of " + payloadLength);

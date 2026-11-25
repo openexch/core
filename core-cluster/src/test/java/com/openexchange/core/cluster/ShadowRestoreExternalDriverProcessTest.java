@@ -443,6 +443,68 @@ public class ShadowRestoreExternalDriverProcessTest {
     }
 
     /** The member whose role counter reads LEADER. */
+    /**
+     * Three members on external aeronmd drivers, {@code TRANSPORT_CONSENSUS_TERM_LENGTH=128k}: each member's consensus
+     * publications (one per peer) name the term in the driver's counter label and map three such terms, and each
+     * driver holds at least two peer images of that length. The leader's engine is then killed with deposits in flight;
+     * an election closes among the survivors, the new leader answers new deposits, and its consensus publications are
+     * still on the configured term. The URI parameter governs the channel under an external driver as under the
+     * embedded one (the embedded row and its bare-channel control are {@code ConsensusTermClusterTest}).
+     */
+    @Test(timeout = 600_000)
+    public void threeExternalDriverMembersRunConsensusOnTheConfiguredTermThroughAnElection() throws Exception {
+        System.setProperty("cluster.port.stride", Integer.toString(ClusterPorts.SHARED_HOST_STRIDE));
+        ClusterPorts.resetStrideForTest();
+        final int portBase = 25400;
+        final List<Node> nodes = List.of(new Node("consensus-external-0-", portBase, 0, 3),
+                new Node("consensus-external-1-", portBase, 1, 3), new Node("consensus-external-2-", portBase, 2, 3));
+        final Map<String, String> env = Map.of("TRANSPORT_CONSENSUS_TERM_LENGTH", "128k");
+        for (final Node n : nodes) {
+            n.startDriver();
+            n.startEngine(env, List.of());
+        }
+        for (final Node n : nodes) {
+            n.awaitReady(180_000);
+            final String out = n.log();
+            assertTrue("external driver mode on member " + n.nodeId + ": " + tail(out), out.contains("Driver mode EXTERNAL"));
+            assertTrue("the boot guard names the term on member " + n.nodeId + ": " + tail(out),
+                    out.contains("[BOOT-GUARD] consensus term 128k set (aeron:udp?term-length=128k)"));
+        }
+        final Node leader = awaitLeader(nodes);
+        final Clients c = new Clients(nodes);
+        c.adopt();
+        c.deposits(200);
+        for (final Node n : nodes) {
+            assertEquals("", ConsensusTermClusterTest.consensusTermProblems(n.nodeId, n.aeron().countersReader(),
+                    n.aeronDir.toFile(), 128 * 1024, 2, 2));
+        }
+
+        // deposits in flight, then the leader's engine dies (its driver stays: the survivors' images of it may linger)
+        final Encoders enc = new Encoders();
+        for (int i = 0; i < 1_000; i++) {
+            CoreRestoreRig.offer(c.tool, enc.buf, enc.deposit(c.corr++, 1 + (i % 5), CoreRestoreRig.usd(),
+                    ShadowClusterRig.ONE), c.all);
+        }
+        final long killNs = System.nanoTime();
+        leader.killEngine();
+        final List<Node> survivors = new ArrayList<>();
+        for (final Node n : nodes) {
+            if (n != leader) {
+                survivors.add(n);
+            }
+        }
+        final Node next = awaitLeader(survivors);
+        final long electedMs = (System.nanoTime() - killNs) / 1_000_000;
+        c.close();
+        final Clients after = new Clients(survivors);
+        after.deposits(200);
+        assertEquals("the new leader's consensus publications", "", ConsensusTermClusterTest.consensusTermProblems(
+                next.nodeId, next.aeron().countersReader(), next.aeronDir.toFile(), 128 * 1024, 2, 1));
+        System.out.println("GREEN external consensus term 128k: 3 members x 2 publications + 2 images; leader member "
+                + leader.nodeId + " killed with 1000 deposits in flight, member " + next.nodeId + " leads within "
+                + electedMs + " ms (12 s of it the kill helper's wait) and answers 200 new deposits");
+    }
+
     private static Node awaitLeader(final List<Node> nodes) throws InterruptedException {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         while (System.nanoTime() < deadline) {
@@ -740,7 +802,9 @@ public class ShadowRestoreExternalDriverProcessTest {
             this.base = dir(prefix);
             this.aeronDir = shmDir(prefix + "aeron-");
             this.portBase = portBase;
-            this.probePort = freePort();
+            // the child's computed probe port: base + node x stride (100 when co-located) + the endpoint offset
+            this.probePort = ClusterPorts.port(nodeId, portBase, ClusterPorts.NODE_ENDPOINT_OFFSET,
+                    members > 1 ? ClusterPorts.SHARED_HOST_STRIDE : 0);
             this.nodeId = nodeId;
             this.members = members;
             // the same layout the child derives (CLUSTER_NODE, the hosts, BASE_DIR); built for its paths and contexts
