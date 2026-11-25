@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# One core cluster member per host, external media driver (the prod mode): this file is the same on every host.
+# Host data lives in the env files: cluster.env (the same on every host), member.env (CLUSTER_NODE, the node
+# endpoint port), host.env (heap, CPU set, JVM flags), secrets.env (the key table, root:root 0600; systemd reads it
+# before dropping privileges, the engine user cannot). Needs aeronmd@core.service (cluster-tools deploy/systemd).
+
+[Unit]
+Description=Open Exchange core member (external media driver)
+Documentation=https://github.com/openexch/core/tree/main/deploy
+# The member stops when its driver stops or dies (BindsTo), starts after a usable driver (After: the driver
+# unit is active only once its cnc.dat exists), and comes back with a driver that systemd restarted (WantedBy below).
+BindsTo=aeronmd@core.service
+After=aeronmd@core.service
+After=network-online.target
+Wants=network-online.target
+Conflicts=core-member-embedded.service
+# The restart backoff paces a crash loop; a burst counter would park the unit for good.
+StartLimitIntervalSec=0
+
+[Service]
+Environment=AERON_DIR=/dev/shm/aeron-openexchange-core
+Environment=BASE_DIR=/var/lib/openexchange/core
+EnvironmentFile=/etc/openexchange/core/cluster.env
+EnvironmentFile=/etc/openexchange/core/member.env
+EnvironmentFile=-/etc/openexchange/core/host.env
+EnvironmentFile=/etc/openexchange/core/secrets.env
+StateDirectory=openexchange/core
+StateDirectoryMode=0750
+Type=simple
+User=openexchange
+Group=openexchange
+ExecStart=/opt/openexchange/core/bin/core-launch member external
+Restart=on-failure
+RestartSec=2s
+RestartSteps=6
+RestartMaxDelaySec=60s
+RestartPreventExitStatus=78
+SuccessExitStatus=143
+TimeoutStopSec=30s
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target aeronmd@core.service

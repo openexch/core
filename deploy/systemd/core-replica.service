@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The core replica (not a member: it follows a member over a backup session and keeps verified shadows), external
+# media driver. Its own host at stride 0. Env files: the cluster.env of the members, replica.env
+# (CLUSTER_REPLICA_SLOT, CLUSTER_REPLICA_ADDRESS, the node endpoint port), host.env, secrets.env
+# (CORE_AUTH_CREDENTIAL of class REPLICA). Needs aeronmd@core-replica.service (cluster-tools deploy/systemd).
+
+[Unit]
+Description=Open Exchange core replica (external media driver)
+Documentation=https://github.com/openexch/core/tree/main/deploy
+# Stops when its driver stops or dies, starts after a usable driver, comes back with a restarted driver.
+BindsTo=aeronmd@core-replica.service
+After=aeronmd@core-replica.service
+After=network-online.target
+Wants=network-online.target
+Conflicts=core-replica-embedded.service
+# The restart backoff paces a crash loop; a burst counter would park the unit for good.
+StartLimitIntervalSec=0
+
+[Service]
+Environment=AERON_DIR=/dev/shm/aeron-openexchange-core-replica
+Environment=BASE_DIR=/var/lib/openexchange/core-replica
+EnvironmentFile=/etc/openexchange/core/cluster.env
+EnvironmentFile=/etc/openexchange/core-replica/replica.env
+EnvironmentFile=-/etc/openexchange/core-replica/host.env
+EnvironmentFile=/etc/openexchange/core-replica/secrets.env
+StateDirectory=openexchange/core-replica
+StateDirectoryMode=0750
+Type=simple
+User=openexchange
+Group=openexchange
+ExecStart=/opt/openexchange/core/bin/core-launch replica external
+Restart=on-failure
+RestartSec=2s
+RestartSteps=6
+RestartMaxDelaySec=60s
+RestartPreventExitStatus=78
+SuccessExitStatus=143
+TimeoutStopSec=30s
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target aeronmd@core-replica.service
