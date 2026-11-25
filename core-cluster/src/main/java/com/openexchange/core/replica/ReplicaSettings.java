@@ -265,11 +265,14 @@ public final class ReplicaSettings {
                 v -> ReplicaConfig.DriverMode.valueOf(v.toUpperCase(Locale.ROOT)));
         integer(Key.TRANSPORT_EXTERNAL_DRIVER_TIMEOUT_MS, ReplicaConfig.DEFAULT_EXTERNAL_DRIVER_TIMEOUT_MS, 1,
                 86_400_000L);
-        busySpin = choice(Key.TRANSPORT_IDLE_MODE, "backoff", "busy_spin|backoff", v -> {
+        // The replica shares the members' TRANSPORT_IDLE_MODE. Its agents (the kit's ReplicaEngine) are either busy-spin
+        // or backoff: "sleep" (the members' small-host mode) runs the replica on backoff, never busy-spin.
+        busySpin = choice(Key.TRANSPORT_IDLE_MODE, "backoff", "busy_spin|backoff|sleep", v -> {
             switch (v.toLowerCase(Locale.ROOT)) {
                 case "busy_spin":
                     return Boolean.TRUE;
                 case "backoff":
+                case "sleep":
                     return Boolean.FALSE;
                 default:
                     throw new IllegalArgumentException(v);

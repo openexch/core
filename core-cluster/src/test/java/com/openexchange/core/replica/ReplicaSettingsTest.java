@@ -169,7 +169,9 @@ public class ReplicaSettingsTest {
                 refusal("TRANSPORT_DRIVER_MODE", "shared"));
         assertTrue(with("TRANSPORT_IDLE_MODE", "busy_spin").busySpin());
         assertFalse(with("TRANSPORT_IDLE_MODE", "backoff").busySpin());
-        assertEquals("TRANSPORT_IDLE_MODE 'yield' (expected busy_spin|backoff)", refusal("TRANSPORT_IDLE_MODE", "yield"));
+        assertFalse(with("TRANSPORT_IDLE_MODE", "sleep").busySpin());
+        assertEquals("TRANSPORT_IDLE_MODE 'yield' (expected busy_spin|backoff|sleep)",
+                refusal("TRANSPORT_IDLE_MODE", "yield"));
         assertEquals(ClusterBackup.SourceType.LEADER, with("REPLICA_BACKUP_SOURCE", "leader").sourceType());
         assertEquals(ClusterBackup.SourceType.ANY, with("REPLICA_BACKUP_SOURCE", "ANY").sourceType());
         assertEquals("REPLICA_BACKUP_SOURCE 'member' (expected FOLLOWER|LEADER|ANY)",
