@@ -48,7 +48,7 @@ public class BalanceSnapshotCodecTest {
         CoreEngine orig = engineWithState();
         ExpandableArrayBuffer buf = new ExpandableArrayBuffer();
         int len = serialize(orig, buf);
-        assertEquals("the v6 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V6_TAG, buf.getLong(0));
+        assertEquals("the v7 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V7_TAG, buf.getLong(0));
 
         CoreEngine restored = new CoreEngine();
         BalanceSnapshotCodec.Decoded d = BalanceSnapshotCodec.deserialize(buf, 0, len, restored);
@@ -188,7 +188,7 @@ public class BalanceSnapshotCodecTest {
                 pos += 6 + buf.getInt(pos + 2);
             }
             assertEquals("the walk covers the whole image", len, pos);
-            assertTrue("layout v6 writes the limits record", limitsAt > 0);
+            assertTrue("layout v7 writes the limits record", limitsAt > 0);
             // an image carrying the reserved section (ascending, well-formed length) is refused: spliced in before 13
             final int body = reserved == BalanceSnapshotCodec.SECTION_FEED_STATE ? 92 : 16; // well-formed heads: 92 and 16 bytes
             final byte[] rest = new byte[len - limitsAt];
@@ -227,12 +227,12 @@ public class BalanceSnapshotCodecTest {
                 () -> BalanceSnapshotCodec.deserialize(buf, 0, len, new CoreEngine()));
     }
 
-    /** Layout v6: the limits record and the event ring are mandatory, so an image with no sections is not an image. */
+    /** Layout v7: the limits record and the event ring are mandatory, so an image with no sections is not an image. */
     @Test
     public void anImageWithNoSectionsIsRefused() {
         ExpandableArrayBuffer buf = new ExpandableArrayBuffer();
         int p = 0;
-        buf.putLong(p, BalanceSnapshotCodec.LAYOUT_V6_TAG); p += 8;
+        buf.putLong(p, BalanceSnapshotCodec.LAYOUT_V7_TAG); p += 8;
         for (int i = 0; i < 7; i++) { buf.putLong(p, 0L); p += 8; }
         buf.putByte(p, (byte) 0); p += 1;
         buf.putInt(p, 0); p += 4;

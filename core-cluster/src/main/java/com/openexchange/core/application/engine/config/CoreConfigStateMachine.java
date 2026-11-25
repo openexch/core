@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.openexchange.core.application.engine.config;
 
+import com.openexchange.cluster.WireCeiling;
 import com.openexchange.core.domain.Asset;
 import com.openexchange.core.domain.Market;
 import com.openexchange.core.domain.commands.CoreConfigCommand;
 import com.openexchange.core.domain.commands.CoreConfigCommand.AssetDef;
 import com.openexchange.core.domain.commands.CoreConfigCommand.MarketDef;
+import com.openexchange.core.infrastructure.generated.MessageHeaderDecoder;
 
 import java.util.Arrays;
 import java.util.Comparator;
@@ -20,6 +22,10 @@ public final class CoreConfigStateMachine {
 
     /** Behaviour versions this jar can run (contract section 4c). */
     public static final int[] SUPPORTED_BEHAVIOR_VERSIONS = {1, 2, 3, 4}; // Behaviour 4: the create requestId lookup runs first
+    /** The highest money-schema version this jar decodes; a recorded ceiling above it stops this node. */
+    public static final int SUPPORTED_MAX_WIRE_VERSION = MessageHeaderDecoder.SCHEMA_VERSION;
+    /** The lowest wire ceiling a config may record: the first money-schema version that carries the ceiling. */
+    public static final int MIN_MAX_WIRE_VERSION = 10;
     public static final int SCALE = 8;
     private static final int MAX_SYMBOL = 16;
     private static final int MAX_CODE = 8;
@@ -28,6 +34,7 @@ public final class CoreConfigStateMachine {
     public enum Decision { INVALID, ADOPT, DUPLICATE, STALE, ACCEPT, SWITCH }
 
     private int[] supported = SUPPORTED_BEHAVIOR_VERSIONS.clone();
+    private int supportedMaxWire = SUPPORTED_MAX_WIRE_VERSION;
     private CoreConfigCommand recorded;
     private MarketDef[] byMarketId = new MarketDef[0];
 
@@ -62,6 +69,20 @@ public final class CoreConfigStateMachine {
         return supported.clone();
     }
 
+    /** Test seam: the highest money-schema version this jar decodes, standing in for a later or earlier jar. */
+    public void setSupportedMaxWireVersion(final int version) {
+        this.supportedMaxWire = version;
+    }
+
+    public int supportedMaxWireVersion() {
+        return supportedMaxWire;
+    }
+
+    /** The recorded wire ceiling, 0 when nothing is recorded (the ceiling rule is then off). */
+    public long recordedMaxWireVersion() {
+        return recorded == null ? 0L : recorded.maxWireVersion;
+    }
+
     /**
      * The decision for {@code c}, without mutating anything.
      * {@code globalOpen} and {@code feedVirgin} are replicated inputs the engine passes in (review 2 NOTE-E: this method
@@ -90,7 +111,8 @@ public final class CoreConfigStateMachine {
         if (c.genesisId != recorded.genesisId) {
             return Decision.INVALID;
         }
-        if (c.configVersion == recorded.configVersion && c.behaviorVersion == recorded.behaviorVersion && tablesEqual(c, recorded)) {
+        if (c.configVersion == recorded.configVersion && c.behaviorVersion == recorded.behaviorVersion && tablesEqual(c, recorded)
+                && c.maxWireVersion == recorded.maxWireVersion) {
             return Decision.DUPLICATE;
         }
         if (c.configVersion <= recorded.configVersion) {
@@ -98,6 +120,11 @@ public final class CoreConfigStateMachine {
         }
         if (!tablesEqual(c, recorded)) {
             return Decision.INVALID; // runtime market/asset change is not supported (contract 3 row 5)
+        }
+        // The wire ceiling only rises. ACCEPT and SWITCH below both install the incoming ceiling, so a raise rides
+        // either of them.
+        if (WireCeiling.lowers(c.maxWireVersion, recorded.maxWireVersion)) {
+            return Decision.INVALID;
         }
         if (c.behaviorVersion == recorded.behaviorVersion) {
             return Decision.ACCEPT;
@@ -144,6 +171,11 @@ public final class CoreConfigStateMachine {
         if (Arrays.stream(supported).noneMatch(v -> v == recorded.behaviorVersion)) {
             return "behaviorVersion " + recorded.behaviorVersion + " is not supported by this jar " + Arrays.toString(supported);
         }
+        // A jar that decodes less than the recorded ceiling cannot follow the log
+        final String wire = WireCeiling.jarBelow(recorded.maxWireVersion, supportedMaxWire, "money-schema");
+        if (wire != null) {
+            return wire;
+        }
         if (recorded.markets.length != Market.ALL.length) {
             return "declared " + recorded.markets.length + " markets, compiled " + Market.ALL.length;
         }
@@ -167,10 +199,29 @@ public final class CoreConfigStateMachine {
         return null;
     }
 
+    /**
+     * The log text when {@link #decide} refuses {@code c} at the ceiling row (a lowered ceiling), else null. It
+     * repeats the rows before that one, so it names the ceiling only when the ceiling is what refused the command.
+     * For the log only; {@link #decide} takes the decision.
+     */
+    public String ceilingLoweredReason(final CoreConfigCommand c) {
+        if (recorded != null && invalidReason(c) == null && c.genesisId == recorded.genesisId
+                && c.configVersion > recorded.configVersion && tablesEqual(c, recorded)
+                && WireCeiling.lowers(c.maxWireVersion, recorded.maxWireVersion)) {
+            return "maxWireVersion " + c.maxWireVersion + " below the recorded " + recorded.maxWireVersion
+                    + " (the ceiling only rises)";
+        }
+        return null;
+    }
+
     /** Section 3 row 1: structural validity, or null. */
     public static String invalidReason(final CoreConfigCommand c) {
         if (c.configVersion < 1 || c.behaviorVersion < 1) {
             return "configVersion and behaviorVersion must be >= 1";
+        }
+        final String wire = WireCeiling.invalidReason(c.maxWireVersion, MIN_MAX_WIRE_VERSION);
+        if (wire != null) {
+            return wire;
         }
         final java.util.Set<Integer> assetIds = new java.util.HashSet<>();
         for (final AssetDef a : c.assets) {
@@ -239,6 +290,7 @@ public final class CoreConfigStateMachine {
         copy.configVersion = c.configVersion;
         copy.behaviorVersion = c.behaviorVersion;
         copy.genesisId = c.genesisId; // Recorded as sent (section 8 layout v2)
+        copy.maxWireVersion = c.maxWireVersion; // Recorded as sent; decide refuses a lower one
         copy.markets = sortedMarkets(c.markets);
         copy.assets = sortedAssets(c.assets);
         recorded = copy;

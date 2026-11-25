@@ -25,7 +25,7 @@ public class SnapshotLayoutServiceRestoreTest {
 
     private static final long NOW = 1_700_000_000_000L;
 
-    /** An engine on the next build at behaviour 5, the behaviour that adopts v7. */
+    /** An engine on the next build at behaviour 5, the behaviour that adopts v8. */
     private static CoreEngine atBehaviourFive() {
         final CoreEngine engine = new CoreEngine();
         engine.setEventSink(NoopCoreEventSink.INSTANCE);
@@ -51,9 +51,9 @@ public class SnapshotLayoutServiceRestoreTest {
 
     @Test
     public void anImageInTheWrongLayoutForItsBehaviourStopsTheNodeWithTheLayoutReason() {
-        // a well-formed v6 image that records behaviour 5: every section decodes, every byte is consumed
+        // a well-formed v7 image that records behaviour 5: every section decodes, every byte is consumed
         final ExpandableArrayBuffer image = new ExpandableArrayBuffer();
-        final int length = sealed(SnapshotLayoutTestBuilds.V6, atBehaviourFive(), image);
+        final int length = sealed(SnapshotLayoutTestBuilds.V7, atBehaviourFive(), image);
         final int[] stops = new int[1];
         final CoreClusteredService service = nextBuildService(stops);
 
@@ -66,7 +66,7 @@ public class SnapshotLayoutServiceRestoreTest {
         } finally {
             System.setErr(err);
         }
-        final String reason = "balance snapshot layout v6 does not belong to behaviour 5, which writes v7";
+        final String reason = "balance snapshot layout v7 does not belong to behaviour 5, which writes v8";
         assertEquals(reason, refused.getMessage());
         final String log = captured.toString(StandardCharsets.UTF_8);
         assertTrue(log, log.contains("FATAL snapshot refused: " + reason));
@@ -81,7 +81,7 @@ public class SnapshotLayoutServiceRestoreTest {
         final int length = sealed(NEXT_BUILD.writtenBy(5L).codec(), source, image);
         final int[] stops = new int[1];
         final CoreClusteredService service = nextBuildService(stops);
-        // the peek ahead of the applier knows this build's layouts only, so the v7 image goes in through the applier
+        // the peek ahead of the applier knows this build's layouts only, so the v8 image goes in through the applier
         service.applier().restore(image, length);
         assertEquals(0, stops[0]);
         assertEquals(5L, service.engine().coreConfig().behaviorVersion());

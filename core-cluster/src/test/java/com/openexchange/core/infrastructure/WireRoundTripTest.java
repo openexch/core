@@ -558,7 +558,7 @@ public class WireRoundTripTest {
                 .expectedJournalSeq(3).seenJournalSeq(4).bridgeIdentity(5);
         final var fh = new com.openexchange.core.infrastructure.generated.FeedHaltDecoder().wrapAndApplyHeader(b, 0, hd);
         assertEquals(66, hd.templateId());
-        assertEquals(9, hd.version());
+        assertEquals(10, hd.version());
         assertEquals(List.of(1L, 2L, 3L, 4L, 5L), List.of(fh.correlationId(), fh.meEpochSeen(), fh.expectedJournalSeq(),
                 fh.seenJournalSeq(), fh.bridgeIdentity()));
         assertEquals(com.openexchange.core.infrastructure.generated.FeedHaltReason.SETTLE_REFUSED, fh.reason());
@@ -929,7 +929,7 @@ public class WireRoundTripTest {
     /** The compiled market and asset tables as a behaviour-1 CoreConfig (what the cross-check accepts). */
     private static int coreConfig(final UnsafeBuffer b, final MessageHeaderEncoder he, final long genesisId) {
         final var e = new com.openexchange.core.infrastructure.generated.CoreConfigEncoder().wrapAndApplyHeader(b, 0, he)
-                .correlationId(1).configVersion(1).behaviorVersion(1).genesisId(genesisId);
+                .correlationId(1).configVersion(1).behaviorVersion(1).genesisId(genesisId).maxWireVersion(10);
         final var m = e.marketsCount(com.openexchange.core.domain.Market.ALL.length);
         for (final com.openexchange.core.domain.Market d : com.openexchange.core.domain.Market.ALL) {
             m.next().marketId(d.marketId()).symbol(d.symbol()).baseAssetId(d.baseAsset().id()).quoteAssetId(d.quoteAsset().id())

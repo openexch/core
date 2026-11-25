@@ -93,8 +93,9 @@ public class AdversarialFrameFuzzTest {
     }
 
     private static long[] counters(final FrameReplica r) {
-        return new long[] {r.demuxer.schemaRejectCount(), r.demuxer.decodeRejectCount(), r.demuxer.unknownTemplateCount(),
-            r.demuxer.unhandledTemplateCount()};
+        // a version above the recorded wire ceiling is a header drop too, counted on its own counter
+        return new long[] {r.demuxer.schemaRejectCount() + r.demuxer.aboveCeilingDropCount(), r.demuxer.decodeRejectCount(),
+            r.demuxer.unknownTemplateCount(), r.demuxer.unhandledTemplateCount()};
     }
 
     /** Adds the counter deltas to the tally row; true when any drop counter moved. */

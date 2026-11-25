@@ -63,7 +63,8 @@ public class CoreConfigWireTest {
         int coreConfig(final CoreConfigCommand c) {
             final CoreConfigEncoder e = new CoreConfigEncoder().wrapAndApplyHeader(buf, 0, header)
                     .correlationId(c.correlationId).configVersion(c.configVersion).behaviorVersion(c.behaviorVersion)
-                    .genesisId(c.genesisId); // A7: an ADOPT needs genesisId >= 1
+                    .genesisId(c.genesisId) // A7: an ADOPT needs genesisId >= 1
+                    .maxWireVersion((int) c.maxWireVersion);
             final CoreConfigEncoder.MarketsEncoder m = e.marketsCount(c.markets.length);
             for (final CoreConfigCommand.MarketDef d : c.markets) {
                 m.next().marketId(d.marketId()).symbol(d.symbol()).baseAssetId(d.baseAssetId())

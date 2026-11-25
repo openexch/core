@@ -189,18 +189,18 @@ public class IngressFenceTest {
     }
 
     @Test
-    public void versionOutsideTheExactOneIsDropped() {
-        // The core speaks exactly v9; a v7 or v8 producer is not half-understood, it is dropped and counted, and so is
-        // a v10 one.
+    public void versionOutsideTheJarRangeIsDropped() {
+        // This jar speaks v10 only (range [10, 10]); a v7 to v9 producer is not half-understood, it is dropped and
+        // counted, and so is a v11 one.
         final Rig r = new Rig();
-        for (final int version : new int[] {0, 7, 8, 10}) {
+        for (final int version : new int[] {0, 7, 8, 9, 11}) {
             final int len = r.deposit(1, 0, 100);
             r.buf.putShort(6, (short) version, ByteOrder.LITTLE_ENDIAN);
             r.dispatch(len);
         }
-        assertEquals(4, r.demuxer.schemaRejectCount());
+        assertEquals(5, r.demuxer.schemaRejectCount());
         assertEquals(0, r.engine.accountCount());
-        r.dispatch(r.deposit(1, 0, 100)); // version 9 applies
+        r.dispatch(r.deposit(1, 0, 100)); // version 10 applies
         assertEquals(1, r.engine.accountCount());
     }
 

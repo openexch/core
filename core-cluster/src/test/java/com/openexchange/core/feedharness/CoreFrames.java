@@ -64,7 +64,7 @@ public final class CoreFrames {
     public byte[] coreConfig(long corr, long version, long behavior, long genesisId) {
         zero();
         final CoreConfigEncoder e = new CoreConfigEncoder().wrapAndApplyHeader(buf, 0, header).correlationId(corr)
-                .configVersion(version).behaviorVersion(behavior).genesisId(genesisId);
+                .configVersion(version).behaviorVersion(behavior).genesisId(genesisId).maxWireVersion(10);
         final CoreConfigEncoder.MarketsEncoder m = e.marketsCount(Market.ALL.length);
         for (final Market d : Market.ALL) {
             m.next().marketId(d.marketId()).symbol(d.symbol()).baseAssetId(d.baseAsset().id()).quoteAssetId(d.quoteAsset().id())

@@ -58,7 +58,7 @@ public class CoreShadowIdentityTest {
             final Arm arm = new Arm().genesis();
             final ShadowIdentitySource id = CoreShadowRig.identityOf(arm.applier);
             assertEquals("fresh engine", 0L, id.genesisId());
-            assertEquals("the v6 layout (sections 13 and 14)", 6, id.payloadLayoutHint());
+            assertEquals("the v7 layout (the ceiling in section 8)", 7, id.payloadLayoutHint());
             final List<LogFrame> frames = log.frames().frames();
             long previous = -1;
             boolean refusedBeforeAdopt = false;

@@ -614,7 +614,8 @@ public final class CoreEventPublisher implements CoreEventSink {
                 .limitsVersion(r.limitsVersion()).requestTtlMs(r.requestTtlMs()).requestPerUserCap(r.requestPerUserCap())
                 .orderEventRingCapacity(r.orderEventRingCapacity())
                 .gateState(com.openexchange.core.infrastructure.generated.GateState.get((short) r.gateStateCode()))
-                .asOfLogPosition(asOfLogPosition).genesisId(r.genesisId());
+                .asOfLogPosition(asOfLogPosition).genesisId(r.genesisId())
+                .maxWireVersion((int) r.maxWireVersion());
         // the reason sets are written as their raw bitmask: one bit per GateReason value, exactly the engine's set
         buffer.putInt(MessageHeaderEncoder.ENCODED_LENGTH + CoreConfigReportEncoder.gateReasonsEncodingOffset(), r.gateReasons(),
                 java.nio.ByteOrder.LITTLE_ENDIAN);

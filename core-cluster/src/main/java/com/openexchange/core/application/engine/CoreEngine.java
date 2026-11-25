@@ -916,6 +916,14 @@ public final class CoreEngine {
         return recorded == null ? 0L : recorded.genesisId;
     }
 
+    /**
+     * The wire ceiling of the recorded CoreConfig, 0 while none is recorded. Replicated state, equal on every member;
+     * the ingress gate and the {@code core_max_wire_version} gauge read it.
+     */
+    public long recordedMaxWireVersion() {
+        return coreConfig.recordedMaxWireVersion();
+    }
+
     public void setConfigFailFast(Runnable failFast) {
         this.configFailFast = failFast;
     }
@@ -927,6 +935,15 @@ public final class CoreEngine {
         final boolean foreignCoreHold = c.behaviorVersion == 3 && coreConfig.behaviorVersion() == 2 && foreignHoldInCoreRange();
         final var decision = coreConfig.decide(c, gate.state(OrderEntryGate.GLOBAL) == GateState.OPEN, feedVirgin(),
                 foreignCoreHold);
+        if (decision == com.openexchange.core.application.engine.config.CoreConfigStateMachine.Decision.INVALID) {
+            String why = com.openexchange.core.application.engine.config.CoreConfigStateMachine.invalidReason(c);
+            if (why == null) {
+                why = coreConfig.ceilingLoweredReason(c);
+            }
+            if (why != null) {
+                LOG.warn("CoreConfig REJECTED INVALID: configVersion=%d: %s", c.configVersion, why);
+            }
+        }
         final long version = coreConfig.apply(decision, c);
         // The step to 3 converts the gate to its reason set. The step from 3 to 4 changes no state at all: the set is
         // already in place and the new behaviour only reorders the create path's requestId lookup.
@@ -1029,6 +1046,7 @@ public final class CoreEngine {
         @Override public int requestPerUserCap() { return limits.requestPerUserCap(); }
         @Override public int orderEventRingCapacity() { return limits.orderEventRingCapacity(); }
         @Override public long genesisId() { return recordedGenesisId(); }
+        @Override public long maxWireVersion() { return coreConfig.recordedMaxWireVersion(); }
         @Override public int gateStateCode() { return gate.state(OrderEntryGate.GLOBAL).code(); }
         @Override public int gateReasons() { return gate.reasons(OrderEntryGate.GLOBAL); }
         @Override public int marketCount() { return coreConfig.recorded() == null ? 0 : coreConfig.recorded().markets.length; }

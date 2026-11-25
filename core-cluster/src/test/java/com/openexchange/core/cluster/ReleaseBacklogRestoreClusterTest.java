@@ -154,7 +154,7 @@ public class ReleaseBacklogRestoreClusterTest {
 
     private int coreConfig(final long corr, final long version) {
         final CoreConfigEncoder e = new CoreConfigEncoder().wrapAndApplyHeader(ingress, 0, headerEnc).correlationId(corr)
-                .configVersion(version).behaviorVersion(version).genesisId(GENESIS);
+                .configVersion(version).behaviorVersion(version).genesisId(GENESIS).maxWireVersion(10);
         final CoreConfigEncoder.MarketsEncoder m = e.marketsCount(Market.ALL.length);
         for (final Market d : Market.ALL) {
             m.next().marketId(d.marketId()).symbol(d.symbol()).baseAssetId(d.baseAsset().id()).quoteAssetId(d.quoteAsset().id())

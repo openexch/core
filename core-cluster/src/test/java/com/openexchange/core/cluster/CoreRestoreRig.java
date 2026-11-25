@@ -320,7 +320,7 @@ final class CoreRestoreRig {
             final com.openexchange.core.infrastructure.generated.CoreConfigEncoder e =
                     new com.openexchange.core.infrastructure.generated.CoreConfigEncoder()
                             .wrapAndApplyHeader(into, 0, new MessageHeaderEncoder()).correlationId(corr)
-                            .configVersion(version).behaviorVersion(version).genesisId(genesis);
+                            .configVersion(version).behaviorVersion(version).genesisId(genesis).maxWireVersion(10);
             final com.openexchange.core.infrastructure.generated.CoreConfigEncoder.MarketsEncoder m =
                     e.marketsCount(Market.ALL.length);
             for (final Market d : Market.ALL) {

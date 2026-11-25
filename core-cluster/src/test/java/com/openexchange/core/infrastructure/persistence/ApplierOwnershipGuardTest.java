@@ -44,6 +44,7 @@ public class ApplierOwnershipGuardTest {
     static final Set<String> ENGINE_ALLOWED = Set.of(
             "accountCount", "getLastAppliedTradeId", "getConsumePosition", "getJournalSeq", "isMoneyJournalEnabled",
             "getEventSeq", "recordedGenesisId", // the order journal checks and gauges read the event sequence and genesis
+            "recordedMaxWireVersion", // the wire ceiling gauge
             "getSettleFaultCount", "getSuppressedFeedReleaseCount", "getExhaustedHoldsReaped", "getSettleRejectCount",
             "getLastLogTime", "sessions().size", "gate().state", "deadlines().size", "deadlines().isEmpty",
             "forEachAccountByUserId", "orders().orders", "metricsView"); // The read-only metrics view
@@ -51,7 +52,7 @@ public class ApplierOwnershipGuardTest {
     static final Set<String> ENGINE_COMPONENTS = Set.of("sessions", "gate", "deadlines", "orders");
     static final Set<String> DEMUXER_ALLOWED = Set.of(
             "schemaRejectCount", "decodeRejectCount", "applyErrorCount", "unknownTemplateCount", "unhandledTemplateCount",
-            "unauthorisedCount");
+            "unauthorisedCount", "aboveCeilingDropCount", "maxSupportedVersion");
 
     private static final Pattern ACCESS = Pattern.compile(
             "\\b(engine|demuxer)\\s*(?:\\(\\s*\\))?\\s*(?:\\.|::)\\s*([A-Za-z_$][A-Za-z0-9_$]*)(\\s*\\(\\s*\\)\\s*\\.\\s*([A-Za-z_$][A-Za-z0-9_$]*))?");

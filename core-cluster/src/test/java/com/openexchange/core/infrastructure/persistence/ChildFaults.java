@@ -19,6 +19,15 @@ public final class ChildFaults {
     }
 
     /**
+     * Stands the child in for a jar whose highest supported money-schema version is {@code version}: its demuxer's
+     * range and its config machine's node-local check, installed before the restore and the log replay.
+     */
+    public static void wireJar(final Object service, final long version) {
+        CoreSbeDemuxerAccess.standInForJar((CoreClusteredService)service, (int)version);
+        System.out.println("[restore-child] stands in for a money-schema " + version + " jar");
+    }
+
+    /**
      * Q9 drill (D6): {@code Runtime.halt(exitCode)} right after {@code onTakeSnapshot} returns, so Aeron's
      * own {@code awaitRecordingComplete} and the service ack to the consensus module never run (the window M Q9 is
      * about). A snapshot taken before this node is the leader (a replayed action during recovery) is let through, so

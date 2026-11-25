@@ -110,6 +110,9 @@ The pruner and the cluster watchdogs come from cluster-kit; the core arms them o
 | `RETENTION_MEMBER_WAIT_BYTES` | `2147483648` | how far behind the newest snapshot a member may fall before the floor stops waiting for it (1048576..1099511627776) |
 | `RETENTION_PROBE_TIMEOUT_MS` | `5000` | bound on one read of the leader's log start from the leader's archive (100..60000) |
 | `RETENTION_RECHECK_MAX_MS` | `60000` | longest wait between re-checks of a retention floor that stopped the last purge pass; a floor that rose is purged behind at once, without a new snapshot (1000..3600000) |
+| `RETENTION_OFFBOX` | `off` | `required`: the purge never passes this member's off-box watermark (the position up to which the log is durably stored off the cluster's hosts), and a watermark that is missing, invalid, from another cluster or above the commit position holds the whole log until a correct one is set or an operator releases it. `report`: evaluated, logged and exported, not applied. `off` with a watermark file present refuses the start |
+| `RETENTION_OFFBOX_ALARM_BYTES` | `2147483648` | log bytes held for the off-box copy above which every purge pass prints a CRITICAL line; an alarm, not a limit (1048576..1099511627776) |
+| `RETENTION_OFFBOX_STALE_MS` | `3600000` | age of the watermark file above which every purge pass prints a CRITICAL line; it does not change the floor (1000..604800000) |
 | `ENGINE_CATCHUP_REFUSALS` | `3` | failed catch-up attempts in a row after which a member reads the leader's log start; a member below it exits 1 (1..1000) |
 | `ENGINE_CATCHUP_REFUSAL_WAIT_MS` | `30000` | the time bound next to the count: catch-up failing this long triggers the same check (1000..3600000) |
 | `ENGINE_REJOIN_PEER_WINDOW_MS` | `10000` | how long a gap in the evidence of a reachable quorum is bridged before the rejoin watchdog's clock is cleared (1000..600000); keep it at or above the driver's publication connection timeout. `ENGINE_REJOIN_WAIT_MS` must exceed it or the boot refuses |
@@ -120,6 +123,18 @@ The pruner and the cluster watchdogs come from cluster-kit; the core arms them o
 Settings renamed from earlier releases (for example `ASSETS_ROLE` to `CORE_ROLE`, `AE_AUTH_CREDENTIAL` to `CORE_AUTH_CREDENTIAL`, `BRIDGE_AE_PORT_BASE` to `BRIDGE_CORE_PORT_BASE`, `RCS_MODE` to `SNAPSHOT_MODE`) are refused: a process that still sees an old name, as a variable, property or flag, exits 1 and names the new one. The table is `core-common/src/main/java/com/openexchange/core/config/RetiredSettings.java`.
 
 Ports are `CLUSTER_PORT_BASE + node id * CLUSTER_PORT_STRIDE + offset`, with offsets 1 archive control, 2 client ingress, 3 member, 4 log, 5 catchup transfer. With the defaults, clients connect to port 9302.
+
+#### A copy off the cluster's hosts (`RETENTION_OFFBOX`)
+
+With `RETENTION_OFFBOX=required` a member purges to the lowest of its own floor, the retention floor and its off-box watermark: the position, in bytes of the cluster log, up to which the log is durably stored off every host of the cluster. The watermark is a file on the member (`<clusterDir>/retention/offbox-watermark`) written by a command run on that member's host; this jar carries it:
+
+```
+java -cp core-cluster.jar com.openexchange.cluster.OffBoxWatermarkTool set --cluster-dir <dir> --engine core --cluster-id <n> --genesis-id <g> --log-position-bytes <p> --source <name>
+```
+
+`release`, `show` and `clear` are the other commands; the file format, the states and the exit codes are in the cluster-kit README. A lost, invalid or foreign watermark, or one above the member's commit position, holds the whole log: there is no wait and no give-up, only a correct `set` or an operator's `release`. `/ready` stays 200 while a member holds; the hold is the pruner's error, a CRITICAL line on every purge pass, and the gauges `core_retention_offbox_mode`, `core_retention_offbox_state`, `core_retention_offbox_position_bytes`, `core_retention_offbox_held_bytes`, `core_retention_offbox_age_ms` and `core_retention_offbox_released_bytes`. The file must carry `engine=core`, the member's cluster id and the genesis id of its recorded `CoreConfig`; a member that has not adopted a genesis yet is unbound and holds.
+
+Turn it on only when every member runs a build that knows the setting: write the watermark on every member, then restart each with `RETENTION_OFFBOX=required`. To turn it off, `clear` the file on the member and restart with `off`; `off` with a file present refuses the start (exit 1).
 
 ### Order journal
 

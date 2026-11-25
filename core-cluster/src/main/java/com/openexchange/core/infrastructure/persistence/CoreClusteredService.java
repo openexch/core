@@ -134,6 +134,8 @@ public final class CoreClusteredService implements ClusteredService {
     ShadowRestore.Faults shadowFaults = ShadowRestore.Faults.NONE;
     /** Runtime-net control only: a watermark other than the floor (must trip watermarkIs). */
     java.util.function.LongSupplier prunerWatermarkOverride;
+    /** Test seam: the off-box retention mode of this member instead of the process setting (one JVM, three members). */
+    com.openexchange.cluster.OffBoxWatermark.Mode offBoxModeOverride;
     /**
      * Test seam: sees every frame the publisher emits on THIS member, before the leader
      * gate of {@link #enqueueEgress}, so a test can compare a restarted follower's event stream with the leader's for
@@ -635,6 +637,15 @@ public final class CoreClusteredService implements ClusteredService {
                 .counter("core_ingress_schema_rejects_total",
                         "Ingress frames dropped for a schemaId/version outside this build's supported set (before any body decode)",
                         demuxer::schemaRejectCount)
+                .counter("core_ingress_above_ceiling_drops_total",
+                        "Ingress frames dropped because their header version is above the recorded wire ceiling (before any body decode)",
+                        demuxer::aboveCeilingDropCount)
+                .gauge("core_supported_min_wire_version", "The lowest money-schema version this jar accepts (a jar constant)",
+                        () -> CoreSbeDemuxer.MIN_SUPPORTED_SCHEMA_VERSION)
+                .gauge("core_supported_max_wire_version", "The highest money-schema version this jar accepts (a jar constant)",
+                        demuxer::maxSupportedVersion)
+                .gauge("core_max_wire_version", "The recorded wire ceiling (replicated state), 0 while no CoreConfig is recorded",
+                        engine::recordedMaxWireVersion)
                 .counter("core_ingress_decode_rejects_total",
                         "Ingress frames dropped for frame/group bounds or an invalid enum/field byte (poison input, expected)",
                         demuxer::decodeRejectCount)
@@ -755,6 +766,13 @@ public final class CoreClusteredService implements ClusteredService {
         }
         body.labelledGauge("shadow_retention_skipped_non_usable", "Shadow copies retention never purges, by state"
                 + " (cumulative over passes)", "state", stateNames, stateValues);
+        for (final com.openexchange.cluster.OffBoxWatermark.Gauge g
+                : com.openexchange.cluster.OffBoxWatermark.Gauge.values()) {
+            body.gauge("core_" + g.metricName(), g.help(), () -> {
+                final com.openexchange.cluster.SnapshotLogPruner p = logPruner;
+                return g.read(p == null ? null : p.offBoxWatermark());
+            });
+        }
         body.counter("pruner_wakes_by_shadow_total", "Purge passes run because a shadow requested one", () -> {
             final com.openexchange.cluster.SnapshotLogPruner p = logPruner;
             return p == null ? 0 : p.wakesByShadow();
@@ -902,7 +920,11 @@ public final class CoreClusteredService implements ClusteredService {
                         .reportWatermark(
                                 com.openexchange.cluster.ClusterMemberPositions.from(
                                         cluster.aeron(), cluster.context()),
-                                () -> isLeader);
+                                () -> isLeader)
+                        // The off-box bound, in both snapshot modes: one more minimum on top of this member's own
+                        // floor and the retention floor (RETENTION_OFFBOX, default off: no bound). It is a separate
+                        // input of the pruner, so the ShadowFloor stays the pruner's watermark below.
+                        .offBoxWatermark(offBoxWatermark(cluster.context().clusterDir(), clusterId));
                 if (snapshotModeSettings.floorEnabled()) {
                     // 9.1-9.3: the floor is wired in BOTH modes. Its precondition reads the
                     // newest group's payload kind: a FULL image answers P_cm (today's pruning, unchanged); a stub
@@ -969,6 +991,18 @@ public final class CoreClusteredService implements ClusteredService {
                     + "this cluster will not snapshot or reclaim disk on its own: " + e);
             e.printStackTrace();
         }
+    }
+
+    /** This member's off-box watermark: engine core, its cluster id, and the genesis id the service thread publishes. */
+    private com.openexchange.cluster.OffBoxWatermark offBoxWatermark(final java.io.File clusterDir, final int clusterId) {
+        final java.util.function.LongSupplier genesis = () -> publishedGenesisId;
+        return offBoxModeOverride == null
+                ? new com.openexchange.cluster.OffBoxWatermark(clusterDir,
+                        com.openexchange.cluster.OffBoxWatermark.ENGINE_CORE, clusterId, genesis)
+                : new com.openexchange.cluster.OffBoxWatermark(clusterDir,
+                        com.openexchange.cluster.OffBoxWatermark.ENGINE_CORE, clusterId, genesis, offBoxModeOverride,
+                        com.openexchange.cluster.OffBoxWatermark.DEFAULT_ALARM_BYTES,
+                        com.openexchange.cluster.OffBoxWatermark.DEFAULT_STALE_MS);
     }
 
     /** Set by {@code ClusterConfig.create} before launch: the port the probe endpoint binds. */
@@ -1080,8 +1114,9 @@ public final class CoreClusteredService implements ClusteredService {
         } else {
             consensusReadiness.poll(cluster, nowNs);
         }
-        if (publishedGenesisId == 0 && shadowHousekeeping != null) {
-            publishedGenesisId = new CoreShadowIdentity(engine).genesisId(); // ADOPT seen: the floor may arm
+        if (publishedGenesisId == 0 && (shadowHousekeeping != null || logPruner != null)) {
+            // ADOPT seen: the floor may arm, and the off-box watermark can be matched to this member
+            publishedGenesisId = new CoreShadowIdentity(engine).genesisId();
         }
         if (!consensusModuleInSnapshot()) {
             readyOutsideSnapshot = readiness.ready();
