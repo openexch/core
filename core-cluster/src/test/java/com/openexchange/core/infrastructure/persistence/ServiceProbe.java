@@ -149,6 +149,37 @@ public final class ServiceProbe {
     }
 
     /** 11.6 runtime second net: the pruner gets this watermark instead of the ShadowFloor. */
+    /** This member's off-box retention mode at its next start, instead of the process setting. */
+    public static void offBoxMode(final CoreClusteredService service,
+                                  final com.openexchange.cluster.OffBoxWatermark.Mode mode) {
+        service.offBoxModeOverride = mode;
+    }
+
+    /** The off-box watermark wired into this member's pruner; null while the pruner is not started. */
+    public static com.openexchange.cluster.OffBoxWatermark offBox(final CoreClusteredService service) {
+        final com.openexchange.cluster.SnapshotLogPruner p =
+                (com.openexchange.cluster.SnapshotLogPruner)field(service, "logPruner");
+        return p == null ? null : p.offBoxWatermark();
+    }
+
+    /** The whole {@code /metrics} body of this member, engine gauges included, as the node endpoint renders it. */
+    public static String metricsText(final CoreClusteredService service) {
+        try {
+            final java.lang.reflect.Method m = CoreClusteredService.class.getDeclaredMethod("metricsBody");
+            m.setAccessible(true);
+            return ((com.openexchange.core.infrastructure.metrics.CoreMetricsBody)m.invoke(service)).render();
+        } catch (final ReflectiveOperationException e) {
+            throw new AssertionError("cannot render CoreClusteredService.metricsBody", e);
+        }
+    }
+
+    /** The pruner's last error text, or null. */
+    public static String prunerLastError(final CoreClusteredService service) {
+        final com.openexchange.cluster.SnapshotLogPruner p =
+                (com.openexchange.cluster.SnapshotLogPruner)field(service, "logPruner");
+        return p == null ? null : p.lastError();
+    }
+
     public static void prunerWatermarkOverride(final CoreClusteredService service,
                                                final java.util.function.LongSupplier watermark) {
         service.prunerWatermarkOverride = watermark;

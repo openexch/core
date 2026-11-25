@@ -505,7 +505,7 @@ public class ShadowRestoreExternalDriverProcessTest {
                 + electedMs + " ms (12 s of it the kill helper's wait) and answers 200 new deposits");
     }
 
-    private static Node awaitLeader(final List<Node> nodes) throws InterruptedException {
+    static Node awaitLeader(final List<Node> nodes) throws InterruptedException {
         final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         while (System.nanoTime() < deadline) {
             for (final Node n : nodes) {
@@ -778,8 +778,8 @@ public class ShadowRestoreExternalDriverProcessTest {
 
     // ---------------------------------------------------------------------------------------------------- node
 
-    /** One single-member node: the driver child, the engine child, the test JVM's clients and its directory layout. */
-    private final class Node {
+    /** A member process and its driver process; also the rig of the other external-driver rows of this package. */
+    final class Node {
         final Path base;
         final Path aeronDir;
         final int portBase;
@@ -1024,7 +1024,7 @@ public class ShadowRestoreExternalDriverProcessTest {
     /** Deposits a test client keeps unacked; far below what fills the engine's 16 MiB per-session egress queue. */
     private static final long DEPOSITS_IN_FLIGHT = 8192;
 
-    private final class Clients implements AutoCloseable {
+    final class Clients implements AutoCloseable {
         final Session admin;
         final Session tool;
         final List<Session> all = new ArrayList<>();
@@ -1244,7 +1244,7 @@ public class ShadowRestoreExternalDriverProcessTest {
         return null;
     }
 
-    private static String tail(final String out) {
+    static String tail(final String out) {
         final String[] lines = out.split("\n");
         final StringBuilder sb = new StringBuilder();
         for (int i = Math.max(0, lines.length - 40); i < lines.length; i++) {

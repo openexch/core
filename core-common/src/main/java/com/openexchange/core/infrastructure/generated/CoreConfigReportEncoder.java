@@ -10,11 +10,11 @@ import org.agrona.MutableDirectBuffer;
 @SuppressWarnings("all")
 public final class CoreConfigReportEncoder
 {
-    public static final int BLOCK_LENGTH = 57;
+    public static final int BLOCK_LENGTH = 59;
     public static final int TEMPLATE_ID = 118;
     public static final int SCHEMA_ID = 2;
-    public static final int SCHEMA_VERSION = 9;
-    public static final String SEMANTIC_VERSION = "0.9";
+    public static final int SCHEMA_VERSION = 10;
+    public static final String SEMANTIC_VERSION = "0.10";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final CoreConfigReportEncoder parentMessage = this;
@@ -635,6 +635,58 @@ public final class CoreConfigReportEncoder
     public CoreConfigReportEncoder genesisId(final long value)
     {
         buffer.putLong(offset + 49, value, BYTE_ORDER);
+        return this;
+    }
+
+
+    public static int maxWireVersionId()
+    {
+        return 12;
+    }
+
+    public static int maxWireVersionSinceVersion()
+    {
+        return 10;
+    }
+
+    public static int maxWireVersionEncodingOffset()
+    {
+        return 57;
+    }
+
+    public static int maxWireVersionEncodingLength()
+    {
+        return 2;
+    }
+
+    public static String maxWireVersionMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static int maxWireVersionNullValue()
+    {
+        return 65535;
+    }
+
+    public static int maxWireVersionMinValue()
+    {
+        return 0;
+    }
+
+    public static int maxWireVersionMaxValue()
+    {
+        return 65534;
+    }
+
+    public CoreConfigReportEncoder maxWireVersion(final int value)
+    {
+        buffer.putShort(offset + 57, (short)value, BYTE_ORDER);
         return this;
     }
 

@@ -17,11 +17,13 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Snapshot layout v6: the tag is -6, the limits record is section 13 and the order-event ring is section 14, both
- * mandatory on every behaviour. A v5 image is refused (the cut is a clean genesis). A ring section that disagrees with
- * the limits record, with the image's eventSeq or with its own records is refused, never half restored.
+ * Snapshot layout v7: the tag is -7, section 8 carries the recorded wire ceiling after the genesis id, the limits record
+ * is section 13 and the order-event ring is section 14, both mandatory on every behaviour. v6 and v5 images are refused
+ * (the cut is a clean genesis). A ceiling outside [10, 65534] is refused by the same rule as a config command. A ring
+ * section that disagrees with the limits record, with the image's eventSeq or with its own records is refused, never
+ * half restored.
  */
-public class SnapshotLayoutV6Test {
+public class SnapshotLayoutV7Test {
 
     private static final List<String> STORY = List.of(
             "CLOCK 1700000000000",
@@ -88,8 +90,8 @@ public class SnapshotLayoutV6Test {
         final CoreEngine engine = story();
         final byte[] image = image(engine);
         final UnsafeBuffer b = new UnsafeBuffer(image);
-        assertEquals(-6L, BalanceSnapshotCodec.LAYOUT_V6_TAG);
-        assertEquals("the v6 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V6_TAG, b.getLong(0));
+        assertEquals(-7L, BalanceSnapshotCodec.LAYOUT_V7_TAG);
+        assertEquals("the v7 tag leads the payload", BalanceSnapshotCodec.LAYOUT_V7_TAG, b.getLong(0));
         final int[] limits = section(image, BalanceSnapshotCodec.SECTION_LIMITS);
         assertEquals(BalanceSnapshotCodec.LIMITS_BYTES, limits[1]);
         assertEquals(1L, b.getLong(limits[0]));
@@ -129,10 +131,86 @@ public class SnapshotLayoutV6Test {
     }
 
     @Test
-    public void aV5ImageIsRefused() {
+    public void aV6OrV5ImageIsRefused() {
         final byte[] image = image(story());
+        new UnsafeBuffer(image).putLong(0, BalanceSnapshotCodec.LAYOUT_V6_TAG);
+        assertRefused(image, "balance snapshot layout v6 (tag -6) refused: older than the previous layout;"
+                + " this build reads only v7");
         new UnsafeBuffer(image).putLong(0, BalanceSnapshotCodec.LAYOUT_V5_TAG);
-        assertRefused(image, "reads only v6");
+        assertRefused(image, "reads only v7");
+    }
+
+    /** Section 8 body: configVersion, behaviorVersion, genesisId, then the ceiling. */
+    private static final int CEILING_IN_SECTION_8 = 3 * 8;
+
+    @Test
+    public void sectionEightCarriesTheRecordedCeilingAndARestoreGivesItBack() {
+        final CoreEngine engine = story();
+        assertEquals("the story's config records the ceiling it sent", 10L, engine.coreConfig().recordedMaxWireVersion());
+        final byte[] image = image(engine);
+        final int[] config = section(image, BalanceSnapshotCodec.SECTION_CORE_CONFIG);
+        assertEquals(10L, new UnsafeBuffer(image).getLong(config[0] + CEILING_IN_SECTION_8));
+        final CoreEngine restored = restore(image);
+        assertEquals(10L, restored.coreConfig().recordedMaxWireVersion());
+
+        // a raised ceiling rides the image too
+        raise(engine, 11);
+        assertEquals(11L, engine.coreConfig().recordedMaxWireVersion());
+        final byte[] raised = image(engine);
+        assertEquals(11L, new UnsafeBuffer(raised).getLong(section(raised, BalanceSnapshotCodec.SECTION_CORE_CONFIG)[0]
+                + CEILING_IN_SECTION_8));
+        final CoreEngine onNextJar = new CoreEngine();
+        onNextJar.coreConfig().setSupportedMaxWireVersion(11);
+        BalanceSnapshotCodec.deserialize(new UnsafeBuffer(raised), 0, raised.length, onNextJar);
+        assertEquals(11L, onNextJar.coreConfig().recordedMaxWireVersion());
+        assertArrayEquals("the image is a function of state", raised, image(onNextJar));
+    }
+
+    @Test
+    public void aRestoredCeilingAboveThisJarRestoresThenStopsTheNode() {
+        final CoreEngine engine = story();
+        raise(engine, 11);
+        final byte[] raised = image(engine);
+        final CoreEngine onThisJar = new CoreEngine(); // supports money-schema 10 only
+        final List<String> stops = new java.util.ArrayList<>();
+        onThisJar.setConfigFailFast(() -> stops.add(onThisJar.coreConfig().crossCheck()));
+        BalanceSnapshotCodec.deserialize(new UnsafeBuffer(raised), 0, raised.length, onThisJar);
+        assertEquals("the restore itself succeeds: the ceiling is replicated state", 11L,
+                onThisJar.coreConfig().recordedMaxWireVersion());
+        assertEquals("then the node-local check stops this node, once",
+                List.of("recorded maxWireVersion=11 is above this jar's money-schema version 10"), stops);
+    }
+
+    @Test
+    public void aCeilingOutsideTheRangeIsRefused() {
+        final byte[] image = image(story());
+        final int at = section(image, BalanceSnapshotCodec.SECTION_CORE_CONFIG)[0] + CEILING_IN_SECTION_8;
+        for (final long bad : new long[] {9L, 65_535L, 0L, -1L}) {
+            final byte[] copy = image.clone();
+            new UnsafeBuffer(copy).putLong(at, bad);
+            assertRefused(copy, "balance snapshot CORE_CONFIG: maxWireVersion=" + bad + " must be in [10, 65534]");
+        }
+        for (final long good : new long[] {10L, 65_534L}) {
+            final byte[] copy = image.clone();
+            new UnsafeBuffer(copy).putLong(at, good);
+            final CoreEngine restored = new CoreEngine();
+            restored.coreConfig().setSupportedMaxWireVersion(65_534);
+            BalanceSnapshotCodec.deserialize(new UnsafeBuffer(copy), 0, copy.length, restored);
+            assertEquals(good, restored.coreConfig().recordedMaxWireVersion());
+        }
+    }
+
+    /** The ACCEPT that raises the ceiling: the recorded config, one version on, with {@code to} as its ceiling. */
+    private static void raise(final CoreEngine engine, final long to) {
+        engine.coreConfig().setSupportedMaxWireVersion((int) to);
+        final com.openexchange.core.domain.commands.CoreConfigCommand r = engine.coreConfig().recorded();
+        final com.openexchange.core.domain.commands.CoreConfigCommand c =
+                CoreScenarioRunner.coreConfigFor(r.configVersion + 1, r.behaviorVersion, 1L, 1L, 1L, 0L, 77L);
+        c.genesisId = r.genesisId;
+        c.markets = r.markets.clone();
+        c.assets = r.assets.clone();
+        c.maxWireVersion = to;
+        engine.applyCoreConfig(c, engine.getLastLogTime());
     }
 
     @Test

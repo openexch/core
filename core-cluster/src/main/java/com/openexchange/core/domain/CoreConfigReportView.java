@@ -23,6 +23,9 @@ public interface CoreConfigReportView {
     /** The recorded CoreConfig's genesis id, 0 while no CoreConfig is recorded. */
     long genesisId();
 
+    /** The recorded CoreConfig's wire ceiling, 0 while no CoreConfig is recorded. Never this jar's own version. */
+    long maxWireVersion();
+
     /** The global gate: wire state code and reason bitmask. */
     int gateStateCode();
 

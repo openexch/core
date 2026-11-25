@@ -552,6 +552,7 @@ public final class CoreScenarioRunner {
         final com.openexchange.core.domain.commands.CoreConfigCommand c = new com.openexchange.core.domain.commands.CoreConfigCommand();
         c.reset();
         c.genesisId = DEFAULT_GENESIS_ID;
+        c.maxWireVersion = 10;
         c.correlationId = correlationId;
         c.configVersion = version;
         c.behaviorVersion = behavior;

@@ -247,8 +247,8 @@ public class CoreSnapshotSizingTest {
         final long marketState = 4 + (long) MARKET_SLOTS * MARKET_STATE_BYTES;
         final long gates = 4 + (long) MARKET_SLOTS * GATE_ROW_BYTES;
         final long requests = 8 + 4 + (long) requestRows * REQUEST_ROW_BYTES;
-        // Section 8 layout v2, genesisId after behaviorVersion
-        final long config = 8 + 8 + 8 + 4 + (long) configMarkets * CONFIG_MARKET_BYTES + 4 + (long) configAssets * CONFIG_ASSET_BYTES;
+        // Section 8 (snapshot layout v7): configVersion, behaviorVersion, genesisId, maxWireVersion, then the tables
+        final long config = 8 + 8 + 8 + 8 + 4 + (long) configMarkets * CONFIG_MARKET_BYTES + 4 + (long) configAssets * CONFIG_ASSET_BYTES;
         final long sessions = 4; // in-process: no session authorities
         return HEADER_BYTES + (long) sections * SECTION_HEADER_BYTES
                 + accounts + orderSection + userRisk + marketState + gates + requests + config + sessions + limits + eventRing;

@@ -32,10 +32,11 @@ import org.agrona.MutableDirectBuffer;
  * behaviour switch that adopts the newer one is recorded. An image whose tag is not the one its own recorded
  * behaviour writes is refused.</p>
  *
- * <p><b>PAYLOAD v6 (the v5 layout plus section 13, the limits record, and section 14, the order-event replay
- * ring; written from behaviour 1, the only layout this build carries; v4 and v5 are retired and refused):</b></p>
+ * <p><b>PAYLOAD v7 (the v6 layout with the wire ceiling in section 8; v6 was the v5 layout plus section 13, the limits
+ * record, and section 14, the order-event replay ring; v7 is written from behaviour 1, the only layout this build
+ * carries; v4, v5 and v6 are retired and refused):</b></p>
  * <pre>
- *   [layoutTag          : long]   // LAYOUT_V6_TAG (-6)
+ *   [layoutTag          : long]   // LAYOUT_V7_TAG (-7)
  *   [lastAppliedTradeId : long]
  *   [consumePosition    : long]
  *   [journalSeq         : long]
@@ -77,6 +78,11 @@ public final class BalanceSnapshotCodec {
     public static final long LAYOUT_V5_TAG = -5L;
     /** The layout tag after sections 13 LIMITS and 14 ORDER_EVENT_RING joined: both mandatory, every behaviour. */
     public static final long LAYOUT_V6_TAG = -6L;
+    /**
+     * The layout tag after the wire ceiling joined section 8 (money-schema v10); refuses v6 (the v7 cutover is a clean
+     * genesis).
+     */
+    public static final long LAYOUT_V7_TAG = -7L;
 
     public static final short SECTION_ACCOUNTS = 1;
     public static final short SECTION_ORDERS = 2;
@@ -139,15 +145,15 @@ public final class BalanceSnapshotCodec {
         long peekEventSeq(DirectBuffer src, int payloadOffset, int payloadLength);
     }
 
-    private static final Layout V6 = new Layout() {
+    private static final Layout V7 = new Layout() {
         @Override
         public int write(final CoreEngine engine, final MutableDirectBuffer dst, final int offset) {
-            return serializeV6(engine, dst, offset);
+            return serializeV7(engine, dst, offset);
         }
 
         @Override
         public Decoded read(final DirectBuffer src, final int offset, final int length, final CoreEngine engine) {
-            return deserializeV6(src, offset, length, engine);
+            return deserializeV7(src, offset, length, engine);
         }
 
         @Override
@@ -160,12 +166,13 @@ public final class BalanceSnapshotCodec {
     };
 
     /**
-     * The layouts this build carries. v6 is written from behaviour 1 on, so every behaviour this build runs writes
-     * v6. The next layout joins as the current one with the behaviour version that adopts it, and v6 becomes the
+     * The layouts this build carries. v7 is written from behaviour 1 on, so every behaviour this build runs writes
+     * v7. The next layout joins as the current one with the behaviour version that adopts it, and v7 becomes the
      * previous one: read, and still written below that behaviour.
      */
     public static final SnapshotLayouts<Layout> LAYOUTS = SnapshotLayouts.<Layout>of("balance snapshot")
-            .current(6, LAYOUT_V6_TAG, 1L, V6)
+            .current(7, LAYOUT_V7_TAG, 1L, V7)
+            .retired(6, LAYOUT_V6_TAG)
             .retired(5, LAYOUT_V5_TAG)
             .retired(4, LAYOUT_V4_TAG)
             .build();
@@ -221,10 +228,10 @@ public final class BalanceSnapshotCodec {
         return layouts.writtenBy(engine.coreConfig().behaviorVersion()).codec().write(engine, dst, offset);
     }
 
-    private static int serializeV6(CoreEngine engine, MutableDirectBuffer dst, int offset) {
+    private static int serializeV7(CoreEngine engine, MutableDirectBuffer dst, int offset) {
         final int[] pos = {offset};
 
-        dst.putLong(pos[0], LAYOUT_V6_TAG);
+        dst.putLong(pos[0], LAYOUT_V7_TAG);
         pos[0] += 8;
         dst.putLong(pos[0], engine.getLastAppliedTradeId());
         pos[0] += 8;
@@ -830,8 +837,8 @@ public final class BalanceSnapshotCodec {
     private static final int CORE_ASSET_BYTES = 4 + 8 + 1;
 
     /**
-     * Section 8 CORE_CONFIG (layout v2): configVersion, behaviorVersion, genesisId, then markets and assets
-     * ascending by id, fixed-size rows.
+     * Section 8 CORE_CONFIG: configVersion, behaviorVersion, genesisId, maxWireVersion (layout v7), then markets and
+     * assets ascending by id, fixed-size rows.
      */
     private static int writeCoreConfigSection(CoreEngine engine, MutableDirectBuffer dst, int start) {
         final com.openexchange.core.domain.commands.CoreConfigCommand c = engine.coreConfig().recorded();
@@ -842,6 +849,7 @@ public final class BalanceSnapshotCodec {
         dst.putLong(p, c.configVersion); p += 8;
         dst.putLong(p, c.behaviorVersion); p += 8;
         dst.putLong(p, c.genesisId); p += 8; // layout v2
+        dst.putLong(p, c.maxWireVersion); p += 8; // layout v7
         dst.putInt(p, c.markets.length); p += 4;
         for (final com.openexchange.core.domain.commands.CoreConfigCommand.MarketDef m : c.markets) {
             dst.putInt(p, m.marketId()); p += 4;
@@ -884,11 +892,22 @@ public final class BalanceSnapshotCodec {
 
     private static int readCoreConfigSection(DirectBuffer src, int start, int limit, CoreEngine engine) {
         int pos = start;
+        if (limit - start < 4 * 8 + 4) {
+            throw new IllegalStateException("balance snapshot CORE_CONFIG section is " + (limit - start)
+                    + " bytes, below its head");
+        }
         final com.openexchange.core.domain.commands.CoreConfigCommand c = new com.openexchange.core.domain.commands.CoreConfigCommand();
         c.reset();
         c.configVersion = src.getLong(pos); pos += 8;
         c.behaviorVersion = src.getLong(pos); pos += 8;
         c.genesisId = src.getLong(pos); pos += 8;
+        c.maxWireVersion = src.getLong(pos); pos += 8;
+        // The same rule as a CoreConfig command: a recorded ceiling outside the range is not a state any log produces
+        final String wire = com.openexchange.cluster.WireCeiling.invalidReason(c.maxWireVersion,
+                com.openexchange.core.application.engine.config.CoreConfigStateMachine.MIN_MAX_WIRE_VERSION);
+        if (wire != null) {
+            throw new IllegalStateException("balance snapshot CORE_CONFIG: " + wire);
+        }
         final int nm = src.getInt(pos); pos += 4;
         if (nm < 0 || (long) nm * CORE_MARKET_BYTES > limit - pos) {
             throw new IllegalStateException("balance snapshot CORE_CONFIG declares " + nm + " markets");
@@ -1005,16 +1024,16 @@ public final class BalanceSnapshotCodec {
         return decoded;
     }
 
-    private static Decoded deserializeV6(DirectBuffer src, int offset, int length, CoreEngine engine) {
+    private static Decoded deserializeV7(DirectBuffer src, int offset, int length, CoreEngine engine) {
         final int end = offset + length;
         int pos = offset;
         if (length < 8 + 7 * 8 + 1 + 4) {
-            throw new IllegalStateException("balance snapshot payload too short for the v6 layout: " + length);
+            throw new IllegalStateException("balance snapshot payload too short for the v7 layout: " + length);
         }
         final long tag = src.getLong(pos);
         pos += 8;
-        if (tag != LAYOUT_V6_TAG) {
-            throw new IllegalStateException("balance snapshot layout tag " + tag + " handed to the v6 reader");
+        if (tag != LAYOUT_V7_TAG) {
+            throw new IllegalStateException("balance snapshot layout tag " + tag + " handed to the v7 reader");
         }
         final long lastAppliedTradeId = src.getLong(pos);
         pos += 8;
@@ -1194,7 +1213,7 @@ public final class BalanceSnapshotCodec {
         if (!v3 && haltsSection) {
             throw new IllegalStateException("balance snapshot below behaviour 3 carries a FEED_HALTS section (12)");
         }
-        // Sections 13 and 14 are mandatory on every behaviour: an image without them is not a v6 image
+        // Sections 13 and 14 are mandatory on every behaviour: an image without them is not a v7 image
         if (!limitsSection) {
             throw new IllegalStateException("balance snapshot has no LIMITS section (13)");
         }

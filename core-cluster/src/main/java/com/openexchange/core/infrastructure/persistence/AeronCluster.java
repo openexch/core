@@ -162,6 +162,9 @@ public final class AeronCluster {
         // Refuse to boot on standby-snapshot state before any driver/archive/CM thread starts.
         // A refusal propagates to the lifecycle's startupFailed: printed, exit 1.
         clusterConfig.enforceBootGuards();
+        // RETENTION_OFFBOX=off with an off-box watermark file in the cluster directory refuses the same way: a
+        // setting that was lost must not turn a bounded purge into an unbounded one.
+        com.openexchange.cluster.OffBoxWatermark.checkBoot(clusterConfig.consensusModuleContext().clusterDir());
 
         log.info("Core node %d starting: portBase=%d driverMode=%s idle=%s %s",
                 nodeId, portBase, driverMode, TransportConfig.idleMode(), electionTiming);

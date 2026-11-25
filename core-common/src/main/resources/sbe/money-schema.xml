@@ -2,9 +2,9 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="com.openexchange.core.infrastructure.generated"
                    id="2"
-                   version="9"
-                   semanticVersion="0.9"
-                   description="OMS + ledger core schema (money-schema v9): balances, holds, settlement, order lifecycle, ME feed, admin, session, gateway queries, the genesis id on the query replies. All amounts are 8dp fixed-point int64. One schema, one demuxer, one exact-version gate."
+                   version="10"
+                   semanticVersion="0.10"
+                   description="OMS + ledger core schema (money-schema v9): balances, holds, settlement, order lifecycle, ME feed, admin, session, gateway queries, the genesis id on the query replies, the replicated wire ceiling. All amounts are 8dp fixed-point int64. One schema, one demuxer, one version range gate under the recorded ceiling."
 >
     <types>
         <composite name="messageHeader" description="Message identifiers and length of message root">
@@ -589,6 +589,8 @@
         <field name="behaviorVersion" id="3" type="uint32"/>
         <!-- v7 (RC2 S1): decoded into CoreConfigCommand.genesisId; excluded from the DUPLICATE equality and NOT recorded in S1 (S7 records it and adds it to the equality). -->
         <field name="genesisId"       id="4" type="int64" sinceVersion="7"/>
+        <!-- v10: the wire ceiling. Recorded as sent at ADOPT, only rises later; a frame whose header version is above the recorded value is dropped by every member from the header alone. Valid range [10, 65534]. -->
+        <field name="maxWireVersion"  id="5" type="uint16" sinceVersion="10"/>
         <group name="markets" id="10" dimensionType="groupSizeEncoding">
             <field name="marketId"     id="1" type="int32"/>
             <field name="symbol"       id="2" type="Symbol"/>
@@ -1117,6 +1119,7 @@
         <field name="gateReasons"            id="9"  type="GateReasons"/>
         <field name="asOfLogPosition"        id="10" type="int64"/>
         <field name="genesisId"              id="11" type="int64" sinceVersion="9" description="v9: the genesisId of the recorded CoreConfig, 0 while no CoreConfig is recorded. Replicated state: every member answers the same value."/>
+        <field name="maxWireVersion"         id="12" type="uint16" sinceVersion="10" description="v10: the recorded wire ceiling of the CoreConfig, 0 while no CoreConfig is recorded. Replicated state, never this jar's own supported version."/>
         <group name="markets" id="20" dimensionType="groupSizeEncoding">
             <field name="marketId"          id="1"  type="int32"/>
             <field name="symbol"            id="2"  type="Symbol"/>

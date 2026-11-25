@@ -63,6 +63,7 @@ import com.openexchange.core.infrastructure.generated.RequestOrderEventsDecoder;
 import com.openexchange.core.infrastructure.generated.RequestUserBalancesDecoder;
 import com.openexchange.core.infrastructure.generated.TerminalReleaseDecoder;
 import com.openexchange.core.infrastructure.generated.WithdrawDecoder;
+import com.openexchange.cluster.WireCeiling;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -74,7 +75,7 @@ import java.nio.ByteOrder;
  * objects are reused. The domain never sees a byte buffer; it only ever receives commands.
  *
  * <p><b>The ingress fence (port of the ME's 23090c6).</b> Before any body decode the frame
- * passes: physical bounds, an exact schema/version gate, a per-template minimum blockLength, group
+ * passes: physical bounds, the schema id and wire version gate, a per-template minimum blockLength, group
  * bounds for grouped templates, and the known-template table. Enum bytes are read RAW and range-checked
  * so an out-of-range byte is a deterministic drop, never an {@code IllegalArgumentException} out of a
  * generated accessor. Decoders wrap a view limited to the frame, so stale bytes in the backing receive
@@ -89,15 +90,20 @@ import java.nio.ByteOrder;
 public final class CoreSbeDemuxer {
 
     /**
-     * The wire identity every ingress frame must carry. The version gate is EXACT: the core
-     * speaks v9 only (single-manifest clean-genesis cut); a v8 producer is dropped and counted rather
-     * than half-understood, and no v9 frame reaches a v8 core.
-     * A later additive bump turns this into a range again, with the ME's rule: the floor advances only when
-     * pre-floor producers and pre-floor frames in any replayable log are provably gone.
+     * The wire identity every ingress frame must carry. The version gate is a RANGE,
+     * {@code [MIN_SUPPORTED_SCHEMA_VERSION, EXPECTED_SCHEMA_VERSION]}, under the recorded wire ceiling: a frame above
+     * the recorded {@code CoreConfig.maxWireVersion} is dropped by every member from the header alone, before this
+     * jar's range is consulted ({@link WireCeiling#gate}), so members on different jars treat it alike.
      */
     static final int EXPECTED_SCHEMA_ID = MessageHeaderDecoder.SCHEMA_ID;
     static final int EXPECTED_SCHEMA_VERSION = MessageHeaderDecoder.SCHEMA_VERSION;
-    static final int MIN_SUPPORTED_SCHEMA_VERSION = MessageHeaderDecoder.SCHEMA_VERSION;
+    /**
+     * The floor of the jar range: the first money-schema version that carries the wire ceiling. It is a jar constant,
+     * so two jars with different floors would apply and drop the same frame: it changes only together with a member
+     * compatibility generation change, which means a clean genesis. A literal on purpose, never derived from the
+     * generated version.
+     */
+    static final int MIN_SUPPORTED_SCHEMA_VERSION = 10;
 
     private static final int HEADER = MessageHeaderDecoder.ENCODED_LENGTH;
     private static final int GROUP_HEADER = 4;
@@ -133,6 +139,7 @@ public final class CoreSbeDemuxer {
     // Ingress-reject counters. Plain longs: written only on the cluster service thread, read by the
     // /metrics scraper. NOT replicated, NOT snapshotted: pure local observability.
     private long schemaRejectCount;    // header schemaId/version outside this build's supported set
+    private long aboveCeilingDropCount; // header version above the recorded wire ceiling
     private long decodeRejectCount;    // frame bounds / group bounds / invalid enum or field byte
     private long unknownTemplateCount; // templateId not in this schema at all
     private long unhandledTemplateCount; // in the schema, not served by this build (v7 66/67/68/76)
@@ -142,9 +149,31 @@ public final class CoreSbeDemuxer {
     private boolean applying;
     private boolean applyFailed;
 
+    /**
+     * The highest header version this jar accepts: {@link #EXPECTED_SCHEMA_VERSION} in production. A field, not the
+     * constant, only so a test can stand in for a later or an earlier jar; the ceiling rule never reads it.
+     */
+    private int maxSupportedVersion;
+
     public CoreSbeDemuxer(CoreEngine engine, SettlementProjector projector) {
+        this(engine, projector, EXPECTED_SCHEMA_VERSION);
+    }
+
+    /** Test seam: a demuxer that accepts header versions up to {@code maxSupportedVersion}. */
+    CoreSbeDemuxer(CoreEngine engine, SettlementProjector projector, int maxSupportedVersion) {
         this.engine = engine;
         this.projector = projector;
+        this.maxSupportedVersion = maxSupportedVersion;
+    }
+
+    /** Test seam: stand this demuxer in for a jar whose highest supported version is {@code maxSupportedVersion}. */
+    void setMaxSupportedVersionForTest(final int maxSupportedVersion) {
+        this.maxSupportedVersion = maxSupportedVersion;
+    }
+
+    /** The highest header version this jar accepts. */
+    public int maxSupportedVersion() {
+        return maxSupportedVersion;
     }
 
     /**
@@ -401,18 +430,30 @@ public final class CoreSbeDemuxer {
         frame.wrap(buffer, offset, length);
         headerDecoder.wrap(frame, 0);
 
-        // 2. Header gate, before any body decode: a stale or foreign frame never reaches an accessor.
+        // 2. Header gate, before any body decode: a stale or foreign frame never reaches an accessor. The schema id
+        //    first, then the wire gate: above the recorded ceiling is decided from the header and the replicated
+        //    ceiling only, so every member drops the frame whatever its jar; then this jar's own range.
         final int schemaId = headerDecoder.schemaId();
         final int version = headerDecoder.version();
-        if (schemaId != EXPECTED_SCHEMA_ID
-                || version < MIN_SUPPORTED_SCHEMA_VERSION
-                || version > EXPECTED_SCHEMA_VERSION) {
+        final WireCeiling.Verdict verdict = schemaId != EXPECTED_SCHEMA_ID ? WireCeiling.Verdict.DROP_OUT_OF_RANGE
+                : WireCeiling.gate(version, engine.coreConfig().recordedMaxWireVersion(), MIN_SUPPORTED_SCHEMA_VERSION,
+                        maxSupportedVersion);
+        if (verdict == WireCeiling.Verdict.DROP_ABOVE_CEILING) {
+            final long n = ++aboveCeilingDropCount;
+            if (shouldLogReject(n)) {
+                System.err.println("INGRESS DROP (above ceiling): templateId=" + headerDecoder.templateId()
+                        + " version=" + version + " is above the recorded maxWireVersion="
+                        + engine.coreConfig().recordedMaxWireVersion() + "; aboveCeilingDrops=" + n);
+            }
+            return;
+        }
+        if (verdict != WireCeiling.Verdict.ACCEPT) {
             final long n = ++schemaRejectCount;
             if (shouldLogReject(n)) {
                 System.err.println("INGRESS DROP (schema): schemaId=" + schemaId + " version=" + version
                         + " templateId=" + headerDecoder.templateId() + "; this build speaks schemaId="
                         + EXPECTED_SCHEMA_ID + " version " + MIN_SUPPORTED_SCHEMA_VERSION + ".."
-                        + EXPECTED_SCHEMA_VERSION + "; schemaRejects=" + n);
+                        + maxSupportedVersion + "; schemaRejects=" + n);
             }
             return;
         }
@@ -1090,6 +1131,8 @@ public final class CoreSbeDemuxer {
         c.behaviorVersion = coreConfigDecoder.behaviorVersion();
         // v7: decoded only; excluded from the DUPLICATE equality and not recorded below behaviour v3.
         c.genesisId = coreConfigDecoder.genesisId();
+        // v10: the wire ceiling; every accepted header is at least v10, so the field is always present
+        c.maxWireVersion = coreConfigDecoder.maxWireVersion();
         final java.util.List<com.openexchange.core.domain.commands.CoreConfigCommand.MarketDef> markets = new java.util.ArrayList<>();
         for (final CoreConfigDecoder.MarketsDecoder m : coreConfigDecoder.markets()) {
             final String symbol = fixedAscii(m::symbol, CoreConfigDecoder.MarketsDecoder.symbolLength());
@@ -1577,6 +1620,9 @@ public final class CoreSbeDemuxer {
 
     /** Frames dropped for a schemaId mismatch or a version outside the supported set, before any body decode. */
     public long schemaRejectCount() { return schemaRejectCount; }
+
+    /** Frames dropped because their header version is above the recorded wire ceiling (node-local, never replicated). */
+    public long aboveCeilingDropCount() { return aboveCeilingDropCount; }
 
     /** Frames dropped for frame/group bounds or an invalid enum/field byte. Expected under poison input. */
     public long decodeRejectCount() { return decodeRejectCount; }

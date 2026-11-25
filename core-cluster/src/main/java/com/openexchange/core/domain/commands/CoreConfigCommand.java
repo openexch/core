@@ -22,6 +22,11 @@ public final class CoreConfigCommand {
      * the recorded value (row 2b), and the switch to behaviour 3 needs it non-zero (row 7).
      */
     public long genesisId;
+    /**
+     * money-schema v10: the wire ceiling. Recorded as sent at ADOPT, it only rises afterwards; a frame whose header
+     * version is above the recorded value is dropped by every member from the header alone.
+     */
+    public long maxWireVersion;
     public MarketDef[] markets = new MarketDef[0];
     public AssetDef[] assets = new AssetDef[0];
 
@@ -30,13 +35,14 @@ public final class CoreConfigCommand {
         configVersion = 0;
         behaviorVersion = 0;
         genesisId = 0;
+        maxWireVersion = 0;
         markets = new MarketDef[0];
         assets = new AssetDef[0];
     }
 
     @Override
     public String toString() {
-        return "CoreConfig{v=" + configVersion + " behavior=" + behaviorVersion + " markets=" + Arrays.toString(markets)
+        return "CoreConfig{v=" + configVersion + " behavior=" + behaviorVersion + " maxWireVersion=" + maxWireVersion + " markets=" + Arrays.toString(markets)
                 + " assets=" + Arrays.toString(assets) + "}";
     }
 }

@@ -396,7 +396,7 @@ public class LaneHaltTableTest {
         assertEquals(2L, restored.feed().laneHaltIdentity(0));
         assertEquals(9L, restored.feed().laneHaltSeen(1));
         assertEquals(FeedState.HOLDER_GAP, restored.feed().holders());
-        assertEquals("layout v6 tag", BalanceSnapshotCodec.LAYOUT_V6_TAG, new UnsafeBuffer(ia).getLong(0));
+        assertEquals("layout v7 tag", BalanceSnapshotCodec.LAYOUT_V7_TAG, new UnsafeBuffer(ia).getLong(0));
     }
 
     @Test
@@ -469,11 +469,11 @@ public class LaneHaltTableTest {
         // a v4 tag
         final byte[] v4 = good.clone();
         new UnsafeBuffer(v4).putLong(0, BalanceSnapshotCodec.LAYOUT_V4_TAG);
-        assertRefused(v4, "reads only v6");
+        assertRefused(v4, "reads only v7");
         // and the v5 tag (the layout before the limits record and the event ring)
         final byte[] v5 = good.clone();
         new UnsafeBuffer(v5).putLong(0, BalanceSnapshotCodec.LAYOUT_V5_TAG);
-        assertRefused(v5, "reads only v6");
+        assertRefused(v5, "reads only v7");
     }
 
     @Test

@@ -11,4 +11,25 @@ public final class CoreSbeDemuxerAccess {
     public static int minimumBlockLength(final int templateId) {
         return CoreSbeDemuxer.minimumBlockLength(templateId);
     }
+
+    /** The floor of the jar range. */
+    public static int minSupportedVersion() {
+        return CoreSbeDemuxer.MIN_SUPPORTED_SCHEMA_VERSION;
+    }
+
+    /** A demuxer standing in for a jar whose highest supported money-schema version is {@code maxSupportedVersion}. */
+    public static CoreSbeDemuxer demuxer(final com.openexchange.core.application.engine.CoreEngine engine,
+                                         final com.openexchange.core.application.projection.SettlementProjector projector,
+                                         final int maxSupportedVersion) {
+        return new CoreSbeDemuxer(engine, projector, maxSupportedVersion);
+    }
+
+    /**
+     * Stand a member in for a jar whose highest supported money-schema version is {@code version}: its demuxer's range
+     * and its config machine's node-local check both move, as they would with a different jar.
+     */
+    public static void standInForJar(final CoreClusteredService service, final int version) {
+        service.demuxer().setMaxSupportedVersionForTest(version);
+        service.engine().coreConfig().setSupportedMaxWireVersion(version);
+    }
 }

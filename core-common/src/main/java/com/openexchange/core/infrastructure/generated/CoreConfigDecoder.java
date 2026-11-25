@@ -10,11 +10,11 @@ import org.agrona.DirectBuffer;
 @SuppressWarnings("all")
 public final class CoreConfigDecoder
 {
-    public static final int BLOCK_LENGTH = 24;
+    public static final int BLOCK_LENGTH = 26;
     public static final int TEMPLATE_ID = 70;
     public static final int SCHEMA_ID = 2;
-    public static final int SCHEMA_VERSION = 9;
-    public static final String SEMANTIC_VERSION = "0.9";
+    public static final int SCHEMA_VERSION = 10;
+    public static final String SEMANTIC_VERSION = "0.10";
     public static final java.nio.ByteOrder BYTE_ORDER = java.nio.ByteOrder.LITTLE_ENDIAN;
 
     private final CoreConfigDecoder parentMessage = this;
@@ -338,6 +338,62 @@ public final class CoreConfigDecoder
         }
 
         return buffer.getLong(offset + 16, BYTE_ORDER);
+    }
+
+
+    public static int maxWireVersionId()
+    {
+        return 5;
+    }
+
+    public static int maxWireVersionSinceVersion()
+    {
+        return 10;
+    }
+
+    public static int maxWireVersionEncodingOffset()
+    {
+        return 24;
+    }
+
+    public static int maxWireVersionEncodingLength()
+    {
+        return 2;
+    }
+
+    public static String maxWireVersionMetaAttribute(final MetaAttribute metaAttribute)
+    {
+        if (MetaAttribute.PRESENCE == metaAttribute)
+        {
+            return "required";
+        }
+
+        return "";
+    }
+
+    public static int maxWireVersionNullValue()
+    {
+        return 65535;
+    }
+
+    public static int maxWireVersionMinValue()
+    {
+        return 0;
+    }
+
+    public static int maxWireVersionMaxValue()
+    {
+        return 65534;
+    }
+
+    public int maxWireVersion()
+    {
+        if (parentMessage.actingVersion < 10)
+        {
+            return 65535;
+        }
+
+        return (buffer.getShort(offset + 24, BYTE_ORDER) & 0xFFFF);
     }
 
 
@@ -1389,6 +1445,9 @@ public final class CoreConfigDecoder
         builder.append('|');
         builder.append("genesisId=");
         builder.append(this.genesisId());
+        builder.append('|');
+        builder.append("maxWireVersion=");
+        builder.append(this.maxWireVersion());
         builder.append('|');
         builder.append("markets=[");
         final int marketsOriginalOffset = markets.offset;
