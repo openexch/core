@@ -396,7 +396,6 @@ final class ShadowClusterRig implements AutoCloseable {
         this.segmentLength = segmentLength;
         System.setProperty("cluster.port.stride", Integer.toString(ClusterPorts.SHARED_HOST_STRIDE));
         ClusterPorts.resetStrideForTest();
-        System.setProperty("core.node.port", "0");
         // the cadence is built in a field initialiser of the service: BEFORE the first service is constructed
         System.setProperty("snapshot.interval.minutes", "0");
         this.originalOut = System.out;

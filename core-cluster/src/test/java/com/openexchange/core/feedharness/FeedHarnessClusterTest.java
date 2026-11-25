@@ -85,7 +85,6 @@ public class FeedHarnessClusterTest {
     Map<String, String> cluster(final int n, final int portBase, final String keys) throws Exception {
         System.setProperty("cluster.port.stride", Integer.toString(ClusterPorts.SHARED_HOST_STRIDE));
         ClusterPorts.resetStrideForTest();
-        System.setProperty("core.node.port", "0");
         System.setProperty(CoreAuth.POLICY.keysProperty(), keys);
         tmp = new File(System.getProperty("java.io.tmpdir"), "s9h-t1-" + portBase);
         IoUtil.delete(tmp, true);
@@ -332,7 +331,7 @@ public class FeedHarnessClusterTest {
                 e.put("CLUSTER_PORT_STRIDE", "100");
                 e.put("BASE_DIR", new File(tmp, "core" + i).getAbsolutePath());
                 e.put("CORE_AUTH_KEYS", T1Keys.table(true));
-                e.put("CORE_NODE_PORT", Integer.toString(base + 90 + i));
+                e.put("CORE_NODE_PORT", Integer.toString(ClusterPorts.port(i, base, ClusterPorts.NODE_ENDPOINT_OFFSET, 100)));
                 e.put("TRANSPORT_IDLE_MODE", "backoff");
                 e.put("TRANSPORT_DRIVER_THREADING", "shared");
                 e.put("TRANSPORT_TERM_LENGTH", "4m");

@@ -150,6 +150,7 @@ public final class StubModeBootGuard {
                     com.openexchange.core.infrastructure.TransportConfig.ArchiveSegment.parse(env);
             final com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts timeouts =
                     com.openexchange.core.infrastructure.TransportConfig.DriverTimeouts.parse(env);
+            final com.openexchange.cluster.ConsensusChannel consensus = com.openexchange.cluster.ConsensusChannel.parse(env);
             if (!probeOff) {
                 final com.openexchange.cluster.SocketBufferProbe.Request rcv =
                         new com.openexchange.cluster.SocketBufferProbe.Request(
@@ -178,6 +179,7 @@ public final class StubModeBootGuard {
             System.out.println("[BOOT-GUARD] " + segment.line(log.termLengthText()) + " (" + segment.length()
                     + " B; a log purge removes whole segments)");
             System.out.println("[BOOT-GUARD] " + timeouts.line());
+            System.out.println("[BOOT-GUARD] " + consensus.line() + " (" + consensus.uri() + ")");
             return new Transport(log, activeMs, segment, timeouts);
         } catch (final IllegalArgumentException bad) {
             final StandbySnapshotBootGuard.Refused refused = new StandbySnapshotBootGuard.Refused(bad.getMessage(), bad);

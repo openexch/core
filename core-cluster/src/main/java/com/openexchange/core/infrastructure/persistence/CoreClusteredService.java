@@ -349,6 +349,8 @@ public final class CoreClusteredService implements ClusteredService {
     private final com.openexchange.cluster.NodeReadiness readiness =
             new com.openexchange.cluster.NodeReadiness();
     private com.openexchange.cluster.NodeEndpoint nodeEndpoint;
+    /** The probe endpoint's port, computed and checked by {@code ClusterConfig.create}; 0 until then. */
+    private volatile int nodeEndpointPort;
     private com.openexchange.cluster.ConsensusReadiness consensusReadiness;
     // Per-message service-thread cost (apply vs drain), per-template cost and the last snapshot's
     // size/timings, served as /metrics by the node endpoint. Plain writes on this thread only; see
@@ -969,19 +971,24 @@ public final class CoreClusteredService implements ClusteredService {
         }
     }
 
+    /** Set by {@code ClusterConfig.create} before launch: the port the probe endpoint binds. */
+    void nodeEndpointPort(final int port) {
+        this.nodeEndpointPort = port;
+    }
+
+    /** The port the probe endpoint binds (0 when no cluster config set one). */
+    int nodeEndpointPort() {
+        return nodeEndpointPort;
+    }
+
     /**
-     * The probe endpoint. A fixed port by default rather than one derived from
-     * the member id, because the member id is still -1 this early (see
-     * {@code allocateEgressCounters}) and a probe on the wrong port reads as a
-     * dead node.
+     * The probe endpoint, on the port {@code ClusterConfig.create} computed from the port base, the member id and the
+     * stride (the same port on every host at the default stride), because the member id is still -1 this early (see
+     * {@code allocateEgressCounters}) and a probe on the wrong port reads as a dead node.
      */
     private void startNodeEndpoint() {
         try {
-            // Probe/metrics port: honor CORE_NODE_PORT if injected (the process
-            // manager sets it authoritatively), else fall back to 9700 + nodeId so
-            // co-located nodes never collide. Base is 9700, not 9600: 9600 is the
-            // Settlement Bridge's metrics port on the same box. cluster.memberId() is
-            // -1 this early in onStart, so read the id the way AeronCluster does.
+            // cluster.memberId() is -1 this early in onStart, so read the id the way AeronCluster does.
             // Empty env is treated as unset.
             String nodeStr = System.getenv("CLUSTER_NODE");
             if (nodeStr == null || nodeStr.isEmpty()) {
@@ -994,17 +1001,12 @@ public final class CoreClusteredService implements ClusteredService {
                 nodeId = 0;
             }
             nodeMetrics.setMemberId(nodeId);
-            // Env first (process manager), then the system property (in-process tests pick a free
-            // port without touching the environment), else the per-node default.
-            final String env = System.getenv("CORE_NODE_PORT");
-            final String prop = System.getProperty("core.node.port");
-            final int port;
-            if (env != null && !env.isEmpty()) {
-                port = Integer.parseInt(env);
-            } else if (prop != null && !prop.isEmpty()) {
-                port = Integer.parseInt(prop);
-            } else {
-                port = 9700 + nodeId;
+            // The port ClusterConfig.create computed and checked (base + node x stride + the kit's endpoint offset).
+            final int port = nodeEndpointPort;
+            if (port <= 0) {
+                System.err.println("NODE CRITICAL: no probe port was set (ClusterConfig.create sets it); the probe"
+                        + " endpoint is not started and this node reads as dead");
+                return;
             }
             // /health and /ready end with version= and build= from this engine jar's manifest (telemetry only)
             nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(this::probe, metricsBody()::render)

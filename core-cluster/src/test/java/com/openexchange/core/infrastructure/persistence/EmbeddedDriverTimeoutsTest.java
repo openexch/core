@@ -49,6 +49,15 @@ public class EmbeddedDriverTimeoutsTest {
                 () -> StubModeBootGuard.enforceTransport(env, new FakeKernel(1L << 30, 1L << 30))).getMessage();
     }
 
+    /** The consensus term is parsed under the same guard: a bad value exits with the guard prefix before any driver. */
+    @Test
+    public void theBootGuardRefusesABadConsensusTerm() {
+        assertEquals("CORE BOOT GUARD: TRANSPORT_CONSENSUS_TERM_LENGTH 'one' is not a size (expected <n>, <n>k, <n>m or"
+                + " <n>g)", refusal(env("TRANSPORT_CONSENSUS_TERM_LENGTH", "one")));
+        assertEquals("CORE BOOT GUARD: TRANSPORT_CONSENSUS_TERM_LENGTH 32k outside [64k, 1g]",
+                refusal(env("TRANSPORT_CONSENSUS_TERM_LENGTH", "32k")));
+    }
+
     @Test
     public void theBootGuardRefusesAClientLivenessOutsideItsRange() {
         assertEquals("CORE BOOT GUARD: TRANSPORT_DRIVER_CLIENT_LIVENESS_MS must be 1000..600000 ms: 500",

@@ -421,8 +421,6 @@ public class SweepSurvivesLeaderChangeClusterTest {
         // Three members on one host need the shared-host port layout; the stride is read once.
         System.setProperty("cluster.port.stride", Integer.toString(ClusterPorts.SHARED_HOST_STRIDE));
         ClusterPorts.resetStrideForTest();
-        // Three core services in one JVM would all bind the probe endpoint's default port (9700 + node.id); take ephemeral ports.
-        System.setProperty("core.node.port", "0");
 
         final File tmp = new File(System.getProperty("java.io.tmpdir"), "core-sweep-leader-change-" + PORT_BASE);
         IoUtil.delete(tmp, true);

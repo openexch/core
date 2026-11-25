@@ -125,8 +125,7 @@ public class CoreDumpDriverModeTest {
     }
 
     private static BridgeConfig dumpConfig() {
-        return new BridgeConfig(List.of(), List.of("localhost"), CORE_PORT_BASE, "localhost:0",
-                "localhost", true, 10_000, 0);
+        return new BridgeConfig(List.of("localhost"), CORE_PORT_BASE, "localhost:0", "localhost");
     }
 
     private static String dump(final CoreDumpDriver driver, final Function<MediaDriver.Context, MediaDriver> launcher) {

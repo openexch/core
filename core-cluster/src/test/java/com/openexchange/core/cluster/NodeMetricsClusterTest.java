@@ -38,7 +38,8 @@ import static org.junit.Assert.assertTrue;
 public class NodeMetricsClusterTest {
 
     private static final int PORT_BASE = 19600; // disjoint from 19300/19400/19500
-    private static final int NODE_PORT = 19760; // /health /ready /metrics
+    // /health /ready /metrics: the computed port (one member, default stride), passed as an agreeing override
+    private static final int NODE_PORT = PORT_BASE + com.openexchange.cluster.ClusterPorts.NODE_ENDPOINT_OFFSET;
     private static final int DEPOSITS = 300;
     private static final long USER = 4242L;
 

@@ -27,7 +27,8 @@ public class AlertsFileTest {
         assertTrue("rule_files: [alerts.yml]", Pattern.compile("rule_files:\\s*\\n\\s*-\\s*alerts\\.yml").matcher(prom).find());
         assertTrue("the core-nodes job", prom.contains("job_name: core-nodes"));
         assertTrue("on /metrics", prom.contains("metrics_path: /metrics"));
-        assertTrue("9700 + nodeId", prom.contains("localhost:9700") && prom.contains("localhost:9701") && prom.contains("localhost:9702"));
+        assertTrue("base 9300 + nodeId x stride 100 + 6", prom.contains("localhost:9306") && prom.contains("localhost:9406")
+                && prom.contains("localhost:9506"));
     }
 
     @Test

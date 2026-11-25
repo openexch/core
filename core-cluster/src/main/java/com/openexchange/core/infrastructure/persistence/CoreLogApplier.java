@@ -66,6 +66,8 @@ public final class CoreLogApplier implements ShadowEngine {
     /** Classification only (Subscribe split); never shared with a transport peek. */
     private final MessageHeaderDecoder classifyHeader = new MessageHeaderDecoder();
     private BalanceSnapshotCodec.Decoded lastRestored;
+    /** The snapshot layouts this build carries; a test stands in another build's set. */
+    private com.openexchange.cluster.SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts = BalanceSnapshotCodec.LAYOUTS;
     /** No {@code on*}, {@code restore} or {@code genesis} call yet: the engine is genesis state. */
     private boolean pristine = true;
     /** An entry threw: the engine is in an unspecified state and this instance must be discarded. */
@@ -97,6 +99,11 @@ public final class CoreLogApplier implements ShadowEngine {
     /** Leader-local transport effects of RegisterSession; {@code null} installs {@code TransportHooks.NONE}. */
     public void setTransportHooks(final CoreSbeDemuxer.TransportHooks hooks) {
         demuxer.setTransportHooks(hooks);
+    }
+
+    /** Test seam: restore as a build that carries another set of snapshot layouts. */
+    void useLayouts(final com.openexchange.cluster.SnapshotLayouts<BalanceSnapshotCodec.Layout> layouts) {
+        this.layouts = Objects.requireNonNull(layouts, "layouts");
     }
 
     // ---------------------------------------------------------------- the shadow-engine surface
@@ -136,7 +143,7 @@ public final class CoreLogApplier implements ShadowEngine {
         pristine = false;
         try {
             final BalanceSnapshotCodec.Decoded decoded = BalanceSnapshotCodec.deserialize(
-                    image, SnapshotEnvelope.payloadOffset(), payloadLength, engine);
+                    layouts, image, SnapshotEnvelope.payloadOffset(), payloadLength, engine);
             if (decoded.bytesConsumed != payloadLength) {
                 // The codec read fewer or more bytes than the envelope carried: a mis-framed payload.
                 // Refusing to start beats serving a ledger assembled from part of a snapshot.

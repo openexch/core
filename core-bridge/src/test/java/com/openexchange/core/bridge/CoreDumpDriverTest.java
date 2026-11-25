@@ -78,8 +78,7 @@ public class CoreDumpDriverTest {
     public void externalWithNoActiveDriverExitsOne() {
         final File dir = new File(System.getProperty("java.io.tmpdir"), "coredump-no-driver-" + ProcessHandle.current().pid());
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
-        final BridgeConfig config = new BridgeConfig(List.of(), List.of("localhost"), 24600, "localhost:0",
-                "localhost", true, 1_000, 0);
+        final BridgeConfig config = new BridgeConfig(List.of("localhost"), 24600, "localhost:0", "localhost");
 
         final int exit = CoreDump.run(CoreDumpDriver.parse("external", dir.getAbsolutePath()), config,
                 ctx -> {

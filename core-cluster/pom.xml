@@ -70,8 +70,8 @@
         </dependency>
 
         <!-- Match-common at the schema 4 build, TEST scope only, for the feed harness
-             (reference translator, CoreApplyRunner, T1 tools). The version is explicit (not the root pin, which stays the
-             frozen bridge's schema 3 match.version), and nothing transitive comes with it: the generated codecs need
+             (reference translator, CoreApplyRunner, T1 tools). The version is explicit (not the root match.version, which
+             core-loadgen reads), and nothing transitive comes with it: the generated codecs need
              only agrona, which this module already pins. The version string alone is not trusted: the harness and its
              tests check the schema XML sha256 inside the jar (rule H1). -->
         <dependency>

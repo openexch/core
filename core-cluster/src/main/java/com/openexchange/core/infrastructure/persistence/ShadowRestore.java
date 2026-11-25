@@ -339,12 +339,13 @@ final class ShadowRestore {
 
     /** What the opened envelope holds: a stub, or the payload whose layout tag the codec reads. */
     record Peek(int payloadOffset, int payloadLength, boolean stub, long tag) {
-        /** Anything that is neither a stub nor v6 is refused with today's codec wording plus the tag. */
+        /** Anything that is neither a stub nor a layout this build reads is refused with the codec's wording. */
         void requireFullImage() {
-            if (tag != BalanceSnapshotCodec.LAYOUT_V6_TAG) {
-                throw new IllegalStateException("balance snapshot layout tag " + tag + " refused: this build reads only"
-                        + " v6 (" + BalanceSnapshotCodec.LAYOUT_V6_TAG + ") or a shadow stub (" + ShadowStub.STUB_TAG
-                        + ")");
+            try {
+                BalanceSnapshotCodec.LAYOUTS.readerFor(tag);
+            } catch (final IllegalStateException refused) {
+                throw new IllegalStateException(refused.getMessage() + " (a shadow stub carries tag " + ShadowStub.STUB_TAG
+                        + ")", refused);
             }
         }
     }

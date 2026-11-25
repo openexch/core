@@ -26,9 +26,11 @@ v1 has no user-facing gateway yet.
 |---|---|---|
 | `core-common` | shared kernel: money value objects and the SBE wire codecs, generated at build time from `src/main/resources/sbe/money-schema.xml` (schema id 2, version 9; version 9 adds `genesisId` to OrderEventsEnd and CoreConfigReport, the recorded CoreConfig's genesis id, 0 before any CoreConfig is recorded) and `money-journal-schema.xml` (schema id 3, version 2: every record carries `logPosition`, the core log position of the entry that produced it) | library |
 | `core-cluster` | the engine: domain model, deterministic engine, Aeron cluster service. Entry point `com.openexchange.core.Main` | `core-cluster/target/core-cluster.jar` |
-| `core-bridge` | Java settlement bridge: tails the matching engine's settlement journal and forwards trades and terminal order statuses into the cluster. Entry point `com.openexchange.core.bridge.BridgeMain` | `core-bridge/target/core-bridge.jar` |
+| `core-bridge` | core client tools: `dump` (the money check's read-only ledger dump) and `set-money-journal on\|off`. The settlement bridge is the C++ `ct-bridge` in cluster-tools. Entry point `com.openexchange.core.bridge.BridgeMain` | `core-bridge/target/core-bridge.jar` |
 | `core-projector` | follows the money journal (an Aeron Archive recording) and projects every money movement into PostgreSQL, resumable from the PostgreSQL high-water mark. Entry point `com.openexchange.core.projector.ProjectorMain` | `core-projector/target/core-projector.jar` |
 | `core-loadgen` | money-path benchmark driver: hold, ME order, trade, settlement journal, bridge, settle, with latencies measured from the scheduled send time. Entry point `com.openexchange.core.loadgen.MoneyLoadGenerator`; the order load generator `com.openexchange.core.loadgen.CoreOrderLoadGenerator` (see Order load generator) | `core-loadgen/target/core-loadgen.jar` |
+
+SBE schema ids are unique across the repos: `sbe-schema-ids.txt` lists every id in use (the same file in core, match, cluster-tools, gateway and tools), and `SbeSchemaIdRegistryTest` (core-common) fails when an id is listed twice or a schema file here is missing from the list or disagrees with its line. A new schema takes a free id in that file, in every repo, first.
 
 `grafana/` holds Prometheus scrape config and alert rules.
 
@@ -65,7 +67,7 @@ Every setting is read from the environment first, then from a JVM system propert
 - `core-cluster/src/main/java/com/openexchange/core/infrastructure/persistence/AeronCluster.java`: cluster membership and state directory.
 - `core-cluster/src/main/java/com/openexchange/core/infrastructure/TransportConfig.java`: media driver and transport.
 - `core-cluster/src/main/java/com/openexchange/core/infrastructure/persistence/SnapshotModeSettings.java`: snapshot stub and restore settings, each with its default and allowed range.
-- `core-bridge/.../BridgeConfig.java` and `core-projector/.../ProjectorConfig.java` for the two agents.
+- `core-bridge/.../BridgeConfig.java` for the client tools and `core-projector/.../ProjectorConfig.java` for the projector.
 
 The main engine settings:
 
@@ -82,6 +84,7 @@ The main engine settings:
 | `TRANSPORT_INTERFACE`, `TRANSPORT_MTU` (`8192`), `TRANSPORT_TERM_LENGTH` (`16m`), `TRANSPORT_LOG_TERM_LENGTH` (`64m`), `TRANSPORT_SNAPSHOT_TERM_LENGTH` (`64m`) | | transport tuning |
 | `TRANSPORT_LOG_RCV_WINDOW` | min(16m, term/2), logged at boot | the log channel's receiver window (`rcv-wnd`), 64k..`TRANSPORT_LOG_TERM_LENGTH`/2. Unset, it derives min(16m, `TRANSPORT_LOG_TERM_LENGTH`/2) (a 16m term gets 8m, the fixture's 1m term 512k, 32m and 64m terms 16m) and the boot guard's line names it: `[BOOT-GUARD] log channel <uri> rcv-wnd 8m derived (min(16m, term/2) of 16m): ...`; a term below 128k cannot derive a legal window and refuses. An explicit value is taken as given (`rcv-wnd <w> set`); above half the term it refuses the boot |
 | `TRANSPORT_LOG_SO_RCVBUF`, `TRANSPORT_LOG_SO_SNDBUF` | `16m` | the log channel's socket buffers (64k..1g); `SO_RCVBUF` below the window refuses the boot |
+| `TRANSPORT_CONSENSUS_TERM_LENGTH` | `1m`, logged at boot | the consensus channel's term (members and the replica). Without it the channel took the driver's term (16m): two publications and two images of 48 MB per member of three. A power of two in [64k, 1g]; anything else refuses the boot (`[BOOT-GUARD] consensus term 1m default (aeron:udp?term-length=1m)`). Consensus messages are under 300 B, so even 64k carries them |
 | `ARCHIVE_SEGMENT_LENGTH` | max(64m, `TRANSPORT_LOG_TERM_LENGTH`), logged at boot | the archive's segment file length (members and the replica). A log purge removes whole segments only, so a log keeps up to one segment below the floor; a small box or a test fixture sets it down (the docker fixture runs 1m) so its logs actually purge. A power of two in [64k, 1g] and at least `TRANSPORT_LOG_TERM_LENGTH` (Aeron would raise the log's segments to the term silently); anything else refuses the boot. The boot guard's line names it: `[BOOT-GUARD] archive segment 1m set (1048576 B; ...)`. `-Daeron.archive.segment.file.length` is not read: the core sets the length explicitly |
 | `CORE_DRIVER_DIR_ACTIVE_MS` | `10000` | embedded mode: a driver directory whose heartbeat is at most this old belongs to a live driver and refuses the boot (2000..600000); external mode ignores it |
 | `TRANSPORT_DRIVER_CLIENT_LIVENESS_MS` | `5000` | embedded mode: the member driver's client liveness timeout (1000..600000). It is also the longest whole-process pause (a frozen VM, a stopped container) a member survives: after a longer stall the member's own Aeron clients close themselves and the member exits 1 for a supervised restart. External mode takes `aeron.client.liveness.timeout` from the aeronmd's properties instead |
@@ -90,7 +93,7 @@ The main engine settings:
 | `CORE_LEADER_HEARTBEAT_INTERVAL_MS` | `100` | how often the leader sends a heartbeat |
 | `CORE_LEADER_HEARTBEAT_TIMEOUT_MS` | `1000` | how long followers wait without a heartbeat before they start an election; at least 3 x the interval |
 | `CORE_ELECTION_TIMEOUT_MS` | `1000` | election round timeout |
-| `CORE_NODE_PORT` | `9700 + node id` | HTTP probe port |
+| `CORE_NODE_PORT` | computed: `CLUSTER_PORT_BASE + node id x CLUSTER_PORT_STRIDE + 6` | HTTP probe port (`/health`, `/ready`, `/metrics`): the same on every host at stride 0. Optional; a value that disagrees with the computed port refuses the boot |
 
 The log channel's socket buffers are probed at boot in both driver modes: when the kernel grants less than `TRANSPORT_LOG_SO_RCVBUF` / `TRANSPORT_LOG_SO_SNDBUF`, the member exits 1 with `CORE BOOT GUARD:` naming `net.core.rmem_max` / `net.core.wmem_max`, the current and the needed value. Every member host needs `net.core.rmem_max` and `net.core.wmem_max` >= 16777216 with the defaults (`sysctl -w`, persisted in `/etc/sysctl.d`). In external mode the URI's `rcv-wnd`, `so-rcvbuf` and `so-sndbuf` override the aeronmd's own defaults for the log image. A restart within `CORE_DRIVER_DIR_ACTIVE_MS` of a kill of the member's own embedded driver refuses until the bound passes: the process manager's restart delay must cover it.
 
@@ -190,7 +193,7 @@ The leader's archive is never a pull source while it leads (`shadow_pull_source_
 | `CLUSTER_REPLICA_SLOT` | `3` | port slot; must not collide with a member on the same host |
 | `CLUSTER_REPLICA_ADDRESS` | `localhost` (only when every member is local) | address the members reach the replica on |
 | `BASE_DIR` | `./core-replica<slot>` | the replica's archive: log copy and shadows. Keep it on disk |
-| `CORE_NODE_PORT` | `9700 + slot` | `/health`, `/ready`, `/metrics` |
+| `CORE_NODE_PORT` | computed: `CLUSTER_PORT_BASE + slot x CLUSTER_PORT_STRIDE + 6` | `/health`, `/ready`, `/metrics`; optional, a disagreeing value refuses the boot |
 | `REPLICA_BACKUP_SOURCE` | `FOLLOWER` | `FOLLOWER`, `LEADER` or `ANY`; `FOLLOWER` needs two or more members |
 | `REPLICA_BACKUP_QUERY_INTERVAL_MS` | `60000` | how often the backup queries a member |
 | `REPLICA_BACKUP_COOLDOWN_MS` | `12000` | wait after a backup reset |
@@ -229,7 +232,7 @@ it exits 1; wipe `BASE_DIR`. Switch a member to `SNAPSHOT_MODE=shadow` only when
 by as much as `shadow_trigger_total{kind="ALIGNED"}`, and `shadow_replica_verified` is 1. Details in cluster-kit's
 `docs/replica.md` ("Live oracle").
 
-HTTP endpoints: each engine member serves `/health`, `/ready` and `/metrics` on its probe port. The bridge serves `/health` and `/metrics` on `BRIDGE_METRICS_PORT` (default 9600), the projector on `PROJECTOR_METRICS_PORT` (default 9601).
+HTTP endpoints: each engine member serves `/health`, `/ready` and `/metrics` on its probe port. The projector serves them on `PROJECTOR_METRICS_PORT` (default 9601).
 
 ## Order load generator
 

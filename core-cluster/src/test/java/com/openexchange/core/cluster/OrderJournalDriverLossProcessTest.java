@@ -197,7 +197,7 @@ public class OrderJournalDriverLossProcessTest {
             this.base = dir(prefix);
             this.shm = shmDir(prefix + "aeron-");
             this.portBase = portBase;
-            this.probePort = freePort();
+            this.probePort = portBase + com.openexchange.cluster.ClusterPorts.NODE_ENDPOINT_OFFSET; // node 0, stride 0
             this.external = external;
             this.layout = ClusterConfig.create(0, List.of("localhost"), List.of("localhost"), portBase,
                     new TimerPerOrderControlService());

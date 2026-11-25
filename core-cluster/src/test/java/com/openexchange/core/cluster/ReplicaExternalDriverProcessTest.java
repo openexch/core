@@ -123,7 +123,7 @@ public class ReplicaExternalDriverProcessTest {
                 driver = startDriver(base);
                 final Path state = base.resolve("replica-state");
                 final Runnable pump = () -> r.rig.pumpMs(100); // keeps the test's cluster sessions alive
-                final int nodePort = ReplicaRig.freeTcp();
+                final int nodePort = ReplicaRig.nodePort(PORT_BASE);
 
                 // 1. follow and ALIGNED on the external driver
                 final ReplicaChild first = ReplicaChild.start(base, "external-1",
@@ -163,7 +163,7 @@ public class ReplicaExternalDriverProcessTest {
 
                 // 3. control: embedded mode on the external driver's directory is refused by the embedded launch
                 final ReplicaChild control = ReplicaChild.start(base, "embedded-on-external-dir",
-                        replicaEnv(driver, base.resolve("replica-state-control"), ReplicaRig.freeTcp(), "embedded"),
+                        replicaEnv(driver, base.resolve("replica-state-control"), ReplicaRig.nodePort(PORT_BASE), "embedded"),
                         List.of("replica"));
                 children.add(control);
                 final int controlExit = control.awaitExit(60_000);
@@ -235,7 +235,7 @@ public class ReplicaExternalDriverProcessTest {
             try {
                 x.bootMembers();
                 driver = startDriver(base);
-                final int port = ReplicaRig.freeTcp();
+                final int port = ReplicaRig.nodePort(PORT_BASE_LOAD);
                 child = ReplicaChild.start(base, "external-load", x.childEnv(base.resolve("replica-state"),
                         driver.dir.toString(), port, "external"), List.of("replica"));
                 x.awaitChildLine(child, "[REPLICA] bootstrap done: restore_path=GENESIS", 120_000);
@@ -307,7 +307,7 @@ public class ReplicaExternalDriverProcessTest {
                 driver = startDriver(base);
                 final Path state = base.resolve("replica-state");
                 final Runnable pump = () -> r.rig.pumpMs(100);
-                final int nodePort = ReplicaRig.freeTcp();
+                final int nodePort = ReplicaRig.nodePort(PORT_BASE_HOLD);
                 final Map<String, String> env = replicaEnv(driver, state, nodePort, "external", PORT_BASE_HOLD);
                 env.put("REPLICA_VERIFY_WAIT_MS", Long.toString(VERIFY_WAIT_MS));
 
@@ -421,7 +421,7 @@ public class ReplicaExternalDriverProcessTest {
                 driver = startDriver(base);
                 final Path state = base.resolve("replica-state");
                 final Runnable pump = () -> r.rig.pumpMs(100);
-                final int nodePort = ReplicaRig.freeTcp();
+                final int nodePort = ReplicaRig.nodePort(PORT_BASE_PULL);
                 final Map<String, String> env = replicaEnv(driver, state, nodePort, "external", PORT_BASE_PULL);
                 env.put("SHADOW_PULL_SOURCES", r.rig.sources(r.rig.members.get(0), m1, keeper));
                 env.put("SHADOW_PULL_PERIOD_MS", "1000");

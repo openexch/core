@@ -41,7 +41,7 @@ public class ReplicaKillRestartUnderLoadTest {
                 final Path base = x.rig.tmp.toPath();
                 final Path state = base.resolve("replica-state");
                 final String aeronDir = base.resolve("replica-aeron").toString();
-                final int port = ReplicaRig.freeTcp();
+                final int port = ReplicaRig.nodePort(PORT_BASE);
                 final ReplicaChild first = ReplicaChild.start(base, "replica-1", x.childEnv(state, aeronDir, port,
                         "embedded"), List.of("replica"));
                 children.add(first);
