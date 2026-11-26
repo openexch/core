@@ -65,6 +65,28 @@ public final class ServiceProbe {
         return null;
     }
 
+    /** The service's journal retention thread; null when it did not start. */
+    public static com.openexchange.cluster.journal.JournalRetentionAgent journalRetention(
+            final CoreClusteredService service) {
+        return (com.openexchange.cluster.journal.JournalRetentionAgent)field(service, "journalRetention");
+    }
+
+    /** The detail line of {@code /health} and {@code /ready} as the node endpoint serves it. */
+    public static String probeDetail(final CoreClusteredService service) {
+        return probe(service).detail();
+    }
+
+    /** The whole {@code /metrics} body as the node endpoint renders it. */
+    public static String metrics(final CoreClusteredService service) {
+        try {
+            final java.lang.reflect.Method m = CoreClusteredService.class.getDeclaredMethod("metricsBody");
+            m.setAccessible(true);
+            return ((com.openexchange.core.infrastructure.metrics.CoreMetricsBody)m.invoke(service)).render();
+        } catch (final ReflectiveOperationException e) {
+            throw new AssertionError("cannot render CoreClusteredService.metricsBody()", e);
+        }
+    }
+
     /** {@code /ready} as the node endpoint computes it. */
     public static boolean ready(final CoreClusteredService service) {
         return ((NodeReadiness)field(service, "readiness")).ready();

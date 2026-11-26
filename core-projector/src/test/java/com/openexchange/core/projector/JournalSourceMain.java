@@ -29,8 +29,11 @@ import java.nio.charset.StandardCharsets;
  * replay does). Each stdin line {@code publish <n>} appends n more; after each batch it prints
  * {@code [SOURCE] recorded <lastSeq>} once the archive has recorded it. The line {@code replays} prints
  * {@code [SOURCE] replays <n>}: the replay sessions this archive runs (its replay session count counter).
- * Args: {@code <aeronDir> <archiveDir> <controlPort> <initialCount> [fresh|keep]};
- * {@code keep} opens the archive left by a killed source instead of deleting it (a member restart).
+ * Args: {@code <aeronDir> <archiveDir> <controlPort> <initialCount> [fresh|keep] [<clusterDir> <genesisId>]};
+ * {@code keep} opens the archive left by a killed source instead of deleting it (a member restart). With a cluster
+ * directory and a genesis id the source runs cluster-kit's journal retention thread on its own archive, as a core
+ * member does (its settings from the {@code journal.retention.*} properties), and the line {@code start} prints
+ * {@code [SOURCE] start <position>}: the recording's start position as the archive has it.
  */
 public final class JournalSourceMain {
 
@@ -61,8 +64,25 @@ public final class JournalSourceMain {
                     archive.archiveId())) == CountersReader.NULL_COUNTER_ID) {
                 Thread.sleep(10);
             }
-            System.out.println("[SOURCE] archive at " + control + ", recording "
-                    + RecordingPos.getRecordingId(counters, counterId));
+            final long recordingId = RecordingPos.getRecordingId(counters, counterId);
+            System.out.println("[SOURCE] archive at " + control + ", recording " + recordingId);
+            if (args.length > 6) {
+                // the member purges itself: the kit's thread, its own archive session, the reader files of this dir
+                new com.openexchange.cluster.journal.JournalRetentionAgent(new File(args[5]),
+                        new AeronArchive.Context().aeronDirectoryName(aeronDir).controlRequestChannel(control)
+                                .controlResponseChannel("aeron:udp?endpoint=localhost:0"),
+                        com.openexchange.cluster.journal.JournalReaders.ENGINE_CORE, 0, () -> Long.parseLong(args[6]),
+                        com.openexchange.cluster.journal.JournalRetention.Settings.fromEnv("money"),
+                        java.util.List.of(new com.openexchange.cluster.journal.JournalProfile("money",
+                                ProjectorConfig.MONEY_JOURNAL_STREAM_ID, "aeron:ipc",
+                                com.openexchange.core.infrastructure.journal.generated.JournalDepositDecoder.SCHEMA_ID,
+                                MessageHeaderEncoder.ENCODED_LENGTH,
+                                com.openexchange.cluster.journal.JournalProfile.NO_EPOCH,
+                                java.util.Map.of(com.openexchange.core.infrastructure.journal.generated
+                                        .JournalDepositDecoder.TEMPLATE_ID, MessageHeaderEncoder.ENCODED_LENGTH
+                                        + com.openexchange.core.infrastructure.journal.generated.JournalDepositDecoder
+                                        .logPositionEncodingOffset()), 2, 160))).start();
+            }
             long seq = 0;
             seq = publish(pub, counters, counterId, seq, initial);
             final BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -72,6 +92,8 @@ public final class JournalSourceMain {
                     seq = publish(pub, counters, counterId, seq, Integer.parseInt(line.substring(8).trim()));
                 } else if ("replays".equals(line.trim())) {
                     System.out.println("[SOURCE] replays " + replays(counters));
+                } else if ("start".equals(line.trim())) {
+                    System.out.println("[SOURCE] start " + archive.getStartPosition(recordingId));
                 }
             }
             // stdin closed: keep the source up until the test kills it
