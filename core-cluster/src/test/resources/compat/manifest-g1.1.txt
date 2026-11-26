@@ -1,0 +1,8 @@
+format=member-compat-manifest/1
+wire_floor=10
+wire_top=10
+behaviors=1,2,3,4
+layout=7 since_behavior=1
+journal=money-journal schema=3 version=2
+journal=money-schema schema=2 version=10
+journal=order-journal schema=5 version=1

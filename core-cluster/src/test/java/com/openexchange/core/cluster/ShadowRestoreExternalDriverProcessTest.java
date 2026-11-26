@@ -848,12 +848,18 @@ public class ShadowRestoreExternalDriverProcessTest {
         }
 
         Process startEngine(final Map<String, String> extraEnv, final List<String> jvmArgs) throws IOException {
+            return startEngine(extraEnv, jvmArgs, ENGINE_MAIN);
+        }
+
+        /** As above with another entry point on the test class path (a test build of {@code Main}). */
+        Process startEngine(final Map<String, String> extraEnv, final List<String> jvmArgs, final String mainClass)
+                throws IOException {
             starts++;
             final List<String> cmd = java();
             cmd.addAll(jvmArgs);
             cmd.addAll(List.of("-Dcore.auth.keys=" + TestAuth.KEYS, "-Dsnapshot.interval.minutes=0",
                     "-XX:ErrorFile=" + base.resolve("hs_err_pid%p.log"), "-cp", System.getProperty("java.class.path"),
-                    ENGINE_MAIN));
+                    mainClass));
             final ProcessBuilder pb = new ProcessBuilder(cmd);
             final Map<String, String> env = pb.environment();
             env.put("BASE_DIR", base.resolve("state").toString());

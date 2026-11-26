@@ -147,6 +147,7 @@ public class CmSnapshotSizeClusterTest {
         final TimerPerOrderControlService service = new TimerPerOrderControlService();
         final List<String> hosts = List.of("localhost");
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, hosts, portBase, service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         final String driverDir = new File(tmp, "driver").getAbsolutePath();
         cfg.baseDir(new File(tmp, "node0"));
         cfg.aeronDirectoryName(driverDir);

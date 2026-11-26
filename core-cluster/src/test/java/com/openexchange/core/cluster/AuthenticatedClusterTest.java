@@ -163,6 +163,7 @@ public class AuthenticatedClusterTest {
         final List<String> hosts = List.of("localhost");
         final CoreClusteredService service = new CoreClusteredService();
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, PORT_BASE, service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(new File(tmp, "node0"));
         cfg.aeronDirectoryName(aeronDir);
         cfg.idleStrategySupplier(BackoffIdleStrategy::new);

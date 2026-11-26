@@ -421,6 +421,7 @@ public class RetentionAuthorityClusterTest {
         m.service = new RetentionProbeService(id);
         TestAuth.install();
         m.cfg = ClusterConfig.create(id, hosts, hosts, PORT_BASE, m.service);
+        m.cfg.memberCompat(m.cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         m.cfg.baseDir(new File(tmp, "node" + id));
         m.cfg.aeronDirectoryName(new File(tmp, "driver" + id).getAbsolutePath());
         m.cfg.idleStrategySupplier(BackoffIdleStrategy::new);

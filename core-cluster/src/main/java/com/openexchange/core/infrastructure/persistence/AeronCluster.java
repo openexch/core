@@ -165,9 +165,17 @@ public final class AeronCluster {
         // RETENTION_OFFBOX=off with an off-box watermark file in the cluster directory refuses the same way: a
         // setting that was lost must not turn a bounded purge into an unbounded one.
         com.openexchange.cluster.OffBoxWatermark.checkBoot(clusterConfig.consensusModuleContext().clusterDir());
+        // S4: the member version on every context with the lifecycle's exit 78 as the refusal, then the check before
+        // the election (Aeron checks only once a leader exists): a build two levels from the level this member last
+        // saw stops here, before it can canvass
+        final com.openexchange.cluster.MemberCompat own = CoreMemberCompat.own();
+        final com.openexchange.cluster.BuildInfo build = com.openexchange.cluster.BuildInfo.of(AeronCluster.class);
+        clusterConfig.memberCompat(own, com.openexchange.cluster.MemberCompat.fatalOnRefusal(lifecycle, build));
+        com.openexchange.cluster.MemberCompat.bootCheck(lifecycle, clusterConfig.consensusModuleContext().clusterDir(),
+                own, build);
 
-        log.info("Core node %d starting: portBase=%d driverMode=%s idle=%s %s",
-                nodeId, portBase, driverMode, TransportConfig.idleMode(), electionTiming);
+        log.info("Core node %d starting: portBase=%d driverMode=%s idle=%s memberCompat=%s %s",
+                nodeId, portBase, driverMode, TransportConfig.idleMode(), own, electionTiming);
 
         if (driverMode == DriverMode.EXTERNAL) {
             launchWithExternalDriver(clusterConfig, nodeId, lifecycle, journalRuntime, orderJournalRuntime, feedRuntime);

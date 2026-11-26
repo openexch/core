@@ -13,7 +13,7 @@ import static org.junit.Assert.assertTrue;
 
 /**
  * The replica's core binding carries the members' container app version and validator (the
- * members set neither, Aeron's defaults), the core id, a stable identity over the live engine and the
+ * core's member version and the kit validator), the core id, a stable identity over the live engine and the
  * production self-check. It pins what the replica cluster tests rely on.
  */
 public class CoreReplicaBindingTest {
@@ -21,8 +21,13 @@ public class CoreReplicaBindingTest {
     @Test
     public void bindingCarriesTheMembersContainerDefaults() {
         final CoreShadowReplicaMain.Binding b = new CoreShadowReplicaMain.Binding(() -> { });
-        assertEquals("members' appVersion (0.0.1)", ShadowRestoreRunner.DEFAULT_APP_VERSION, b.appVersion());
-        assertSame("members' validator", ShadowRestoreRunner.DEFAULT_VALIDATOR, b.validator());
+        assertEquals("members' appVersion (the core's member version)",
+                com.openexchange.core.infrastructure.persistence.CoreMemberCompat.MEMBER_COMPAT.appVersion(),
+                b.appVersion());
+        assertTrue("members' validator: the kit's one-level window", b.validator().isVersionCompatible(b.appVersion(),
+                com.openexchange.cluster.MemberCompat.of(1, 2).appVersion())
+                && !b.validator().isVersionCompatible(b.appVersion(),
+                ShadowRestoreRunner.DEFAULT_APP_VERSION));
         assertEquals(CoreLogApplier.ENGINE_ID_CORE, b.engineId());
         assertSame("the applier is the engine", b.applier(), b.engine());
         assertSame("one identity source over the live engine", b.identity(), b.identity());

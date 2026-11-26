@@ -64,7 +64,8 @@ public final class CoreClusteredService implements ClusteredService {
     // Every replicated-state mutation goes through the applier (engine, projector, demuxer, envelope).:
     // a CoreConfig cross-check failure stops this node, through the same seam as the apply fence; failFast
     // is read lazily, so a test's recorder swapped in later is the one that runs.
-    private final CoreLogApplier applier = new CoreLogApplier(() -> this.failFast.run());
+    private final CoreLogApplier applier = new CoreLogApplier(() -> this.failFast.run(),
+            () -> this.failFastIncompatible.run());
     // Read-only aliases of the applier's instances (declared after it: field order matters).
     private final CoreEngine engine = applier.engine();
     private final CoreSbeDemuxer demuxer = applier.demuxer();
@@ -380,6 +381,45 @@ public final class CoreClusteredService implements ClusteredService {
         Runtime.getRuntime().halt(1);
     }
 
+    /**
+     * The second fail-fast seam (S4 R-A6): the recorded behaviour or wire ceiling is one this jar cannot run, which a
+     * restart cannot fix, so the exit is 78 ({@code EngineLifecycle.EXIT_CONFIG}, never restarted by the units). The
+     * CRITICAL line is logged before it, as for {@link #failFast}; everything else keeps exit 1. Package-private so
+     * tests swap a recorder in.
+     */
+    Runnable failFastIncompatible = CoreClusteredService::failFastIncompatibleHalt;
+
+    /** Production default of {@link #failFastIncompatible}. */
+    static void failFastIncompatibleHalt() {
+        System.out.flush();
+        System.err.flush();
+        Runtime.getRuntime().halt(com.openexchange.cluster.EngineLifecycle.EXIT_CONFIG);
+    }
+
+    /** The member version the contexts carry, set by {@code ClusterConfig}; {@code /ready} reports it. */
+    private volatile com.openexchange.cluster.MemberCompat memberCompat = CoreMemberCompat.own();
+    /** The capability tokens of {@code /health} and {@code /ready}; built at the endpoint's start. */
+    private volatile com.openexchange.cluster.MemberCompat.Capabilities capabilities;
+
+    /** {@code ClusterConfig} only: the version every context of this member carries. */
+    void memberCompat(final com.openexchange.cluster.MemberCompat own) {
+        this.memberCompat = java.util.Objects.requireNonNull(own, "own");
+    }
+
+    /** The version this member's contexts carry. */
+    public com.openexchange.cluster.MemberCompat memberCompat() {
+        return memberCompat;
+    }
+
+    /** Service thread: the recorded values the capability tokens print (allocates only when one changed). */
+    private void publishRecorded() {
+        final com.openexchange.cluster.MemberCompat.Capabilities c = capabilities;
+        if (c != null) {
+            c.publish(engine.recordedBehaviorVersion(), engine.recordedMaxWireVersion(),
+                    engine.recordedGenesisId() != 0);
+        }
+    }
+
     // The consensus module's authorisation table, the instance ClusterConfig installed; null when the
     // service runs without ClusterConfig (in-process tests), then the denial gauge reads 0.
     private volatile com.openexchange.cluster.auth.ClassAuthorisationService sessionAuthorisation;
@@ -525,6 +565,10 @@ public final class CoreClusteredService implements ClusteredService {
         }
         checkRestoredSessions(cluster);
         publishedGenesisId = new CoreShadowIdentity(engine).genesisId();
+        capabilities = CoreMemberCompat.capabilities(memberCompat,
+                com.openexchange.core.infrastructure.TransportConfig.driverMode()
+                        == com.openexchange.core.infrastructure.TransportConfig.DriverMode.EXTERNAL);
+        publishRecorded();
         startNodeEndpoint();
         startDurability(cluster);
         // Started, not ready: the snapshot is loaded but the log replay may
@@ -640,6 +684,13 @@ public final class CoreClusteredService implements ClusteredService {
                 .counter("core_ingress_above_ceiling_drops_total",
                         "Ingress frames dropped because their header version is above the recorded wire ceiling (before any body decode)",
                         demuxer::aboveCeilingDropCount)
+                .gauge("core_member_compat_generation", "The member version generation this build runs (a jar constant)",
+                        () -> memberCompat.generation())
+                .gauge("core_member_compat_level", "The member version level this build runs (a jar constant)",
+                        () -> memberCompat.level())
+                .gauge("core_supported_behavior_versions",
+                        "Behaviour versions this jar runs, as a bitmask (bit v-1 for version v; a jar constant)",
+                        () -> com.openexchange.cluster.MemberCompat.behaviorBitmask(CoreMemberCompat.behaviors()))
                 .gauge("core_supported_min_wire_version", "The lowest money-schema version this jar accepts (a jar constant)",
                         () -> CoreSbeDemuxer.MIN_SUPPORTED_SCHEMA_VERSION)
                 .gauge("core_supported_max_wire_version", "The highest money-schema version this jar accepts (a jar constant)",
@@ -1043,8 +1094,10 @@ public final class CoreClusteredService implements ClusteredService {
                 return;
             }
             // /health and /ready end with version= and build= from this engine jar's manifest (telemetry only)
+            // then the capability tokens: what this build can do and what the cluster recorded (S4 R-B1)
             nodeEndpoint = new com.openexchange.cluster.NodeEndpoint(this::probe, metricsBody()::render)
-                    .withBuild(com.openexchange.cluster.BuildInfo.of(CoreClusteredService.class));
+                    .withBuild(com.openexchange.cluster.BuildInfo.of(CoreClusteredService.class))
+                    .capabilities(capabilities);
             nodeEndpoint.start(port);
         } catch (Exception e) {
             // A probe endpoint must never be the reason the ledger does not start.
@@ -1277,6 +1330,7 @@ public final class CoreClusteredService implements ClusteredService {
         applicationCallbackDepth++;
         try {
             applyOnSessionMessage(session, timestamp, buffer, offset, length, header);
+            publishRecorded();
         } catch (final com.openexchange.cluster.auth.PrincipalLessSessionException principalLess) {
             haltPrincipalLess(principalLess);
             throw principalLess;

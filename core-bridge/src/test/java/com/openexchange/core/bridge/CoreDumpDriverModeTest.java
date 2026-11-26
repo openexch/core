@@ -90,6 +90,7 @@ public class CoreDumpDriverModeTest {
 
         final ClusterConfig cfg = ClusterConfig.create(0, List.of("localhost"), CORE_PORT_BASE,
                 new CoreClusteredService());
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(new File(tmp, "node0"));
         clusterDriverDir = new File(tmp, "core-driver").getAbsolutePath();
         cfg.aeronDirectoryName(clusterDriverDir);

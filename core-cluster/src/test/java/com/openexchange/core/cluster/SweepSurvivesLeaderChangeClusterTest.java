@@ -352,6 +352,7 @@ public class SweepSurvivesLeaderChangeClusterTest {
         TestAuth.install();
         m.service = new CoreClusteredService();
         m.cfg = ClusterConfig.create(id, hosts, hosts, PORT_BASE, m.service);
+        m.cfg.memberCompat(m.cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         m.cfg.baseDir(new File(tmp, "node" + id));
         m.driverDir = new File(tmp, "driver" + id).getAbsolutePath();
         m.cfg.aeronDirectoryName(m.driverDir);

@@ -11,8 +11,10 @@ import com.openexchange.cluster.replica.ReplicaProcess;
 import com.openexchange.cluster.shadow.ShadowHeader;
 import com.openexchange.cluster.shadow.ShadowIdentitySource;
 import com.openexchange.cluster.shadow.ShadowSelfCheck;
+import com.openexchange.cluster.BuildInfo;
+import com.openexchange.cluster.MemberCompat;
+import com.openexchange.core.infrastructure.persistence.CoreMemberCompat;
 import io.aeron.cluster.VersionValidator;
-import io.aeron.cluster.service.ClusteredServiceContainer;
 
 import java.util.Objects;
 
@@ -67,7 +69,10 @@ public final class CoreShadowReplicaMain {
         for (final String line : settings.pullWarnings()) {
             log.error("%s", line);
         }
-        final Binding binding = new Binding(() -> lifecycle.fatal(EngineLifecycle.EXIT_FATAL, CORE_CONFIG_FAILED));
+        // an incompatible log (another generation, or two levels away) stops the replica with exit 78 at the first
+        // term event, through the same refusal the members use (S4 R-A3)
+        final Binding binding = new Binding(() -> lifecycle.fatal(EngineLifecycle.EXIT_FATAL, CORE_CONFIG_FAILED),
+                CoreMemberCompat.MEMBER_COMPAT, MemberCompat.fatalOnRefusal(lifecycle, BuildInfo.of(Binding.class)));
         log.info("Core replica R%d starting: members=%s driverMode=%s source=%s",
                 settings.slot(), settings.memberHosts(), settings.driverMode(), settings.sourceType());
         final ReplicaProcess.Host host = host(ReplicaProcess.of(lifecycle));
@@ -116,7 +121,8 @@ public final class CoreShadowReplicaMain {
 
     /**
      * The core for the kit replica: one live {@link CoreLogApplier}, its identity, the
-     * scratch-applier self-check and the members' container app version and validator.
+     * scratch-applier self-check and the members' container app version and validator (S4: the core's member version
+     * and the kit validator).
      */
     static final class Binding implements ReplicaEngine {
 
@@ -132,17 +138,23 @@ public final class CoreShadowReplicaMain {
          *                            before any further shadow is produced
          */
         Binding(final Runnable onCoreConfigFailure) {
+            this(onCoreConfigFailure, CoreMemberCompat.MEMBER_COMPAT, MemberCompat.testRefusal("Core replica"));
+        }
+
+        /**
+         * @param own       the members' version ({@link CoreMemberCompat#MEMBER_COMPAT}; tests pass another level)
+         * @param onRefusal what an incompatible log does ({@code MemberCompat.fatalOnRefusal}: exit 78)
+         */
+        Binding(final Runnable onCoreConfigFailure, final MemberCompat own, final MemberCompat.Refusal onRefusal) {
             Objects.requireNonNull(onCoreConfigFailure, "onCoreConfigFailure");
             this.applier = new CoreLogApplier(() -> {
                 onCoreConfigFailure.run();
                 throw new IllegalStateException(CORE_CONFIG_FAILED);
             });
             this.identity = new CoreShadowIdentity(applier.engine());
-            // the members' container defaults: members set neither appVersion nor the validator (CFG:197-205)
-            final ClusteredServiceContainer.Context members = new ClusteredServiceContainer.Context();
-            this.appVersion = members.appVersion();
-            this.validator = members.appVersionValidator() != null ? members.appVersionValidator()
-                    : io.aeron.cluster.AppVersionValidator.SEMANTIC_VERSIONING_VALIDATOR;
+            // the members' pair (ClusterConfig.memberCompat): the engine's version and the kit validator
+            this.appVersion = own.appVersion();
+            this.validator = MemberCompat.validator(own, Objects.requireNonNull(onRefusal, "onRefusal"));
         }
 
         @Override
