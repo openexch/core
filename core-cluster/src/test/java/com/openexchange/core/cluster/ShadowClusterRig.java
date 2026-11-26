@@ -15,6 +15,7 @@ import com.openexchange.core.infrastructure.persistence.TestShadowProducer;
 import com.openexchange.cluster.ClusterPorts;
 import com.openexchange.cluster.testkit.RecordedLog;
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.ClusterControl;
 import io.aeron.cluster.ClusteredMediaDriver;
@@ -25,6 +26,7 @@ import io.aeron.cluster.service.ClusteredServiceContainer;
 import org.agrona.CloseHelper;
 import org.agrona.IoUtil;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersReader;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -66,6 +68,16 @@ final class ShadowClusterRig implements AutoCloseable {
      * every boot logs the value it used.
      */
     static final long DEFAULT_LEADER_HEARTBEAT_TIMEOUT_MS = Long.getLong("core.rig.heartbeat.ms", 1_000);
+    static final String SNAPSHOT_TERM_LENGTH_PROPERTY = "transport.snapshot.term.length";
+    /**
+     * The snapshot publication's term length in the rig. The engine's default is 64m: every snapshot then creates two
+     * publications of three 64 MiB terms on each member (the service's and the consensus module's), and the driver
+     * writes every page of them before it answers. The consensus module waits for that inside its duty cycle and sends
+     * no heartbeat meanwhile. With three members in one JVM that is 1.1 GiB a snapshot: about 350 ms a cycle on a fast
+     * machine, past the heartbeat timeout on a CI runner, and the followers call an election. The rig's snapshots are a
+     * few hundred bytes; 4m is the term the process tests already run with.
+     */
+    static final String RIG_SNAPSHOT_TERM_LENGTH = "4m";
     /** The consensus modules' election timeout (fixed here); with the heartbeat timeout, the election window. */
     static final long ELECTION_TIMEOUT_MS = 1_000;
     /**
@@ -360,6 +372,8 @@ final class ShadowClusterRig implements AutoCloseable {
     long leaderHeartbeatTimeoutMs = DEFAULT_LEADER_HEARTBEAT_TIMEOUT_MS;
     /** Every stderr line that names (the halt texts), recorded like the stdout tee. */
     final Tee errTee;
+    /** True when this rig set the snapshot term length (no story had set one), so close() clears it. */
+    private final boolean ownsSnapshotTermLength;
     private final PrintStream originalErr;
     final List<Member> members = new ArrayList<>();
     /** D4: the first member's {@code aeron.archive.id}; distinct per rig in one JVM. */
@@ -398,6 +412,11 @@ final class ShadowClusterRig implements AutoCloseable {
         ClusterPorts.resetStrideForTest();
         // the cadence is built in a field initialiser of the service: BEFORE the first service is constructed
         System.setProperty("snapshot.interval.minutes", "0");
+        // a story that sets its own snapshot term keeps it
+        this.ownsSnapshotTermLength = System.getProperty(SNAPSHOT_TERM_LENGTH_PROPERTY) == null;
+        if (ownsSnapshotTermLength) {
+            System.setProperty(SNAPSHOT_TERM_LENGTH_PROPERTY, RIG_SNAPSHOT_TERM_LENGTH);
+        }
         this.originalOut = System.out;
         this.tee = new Tee(originalOut, "[SNAPSHOT]", "[shadow restore]");
         System.setOut(tee);
@@ -439,7 +458,8 @@ final class ShadowClusterRig implements AutoCloseable {
         m.cfg.idleStrategySupplier(BackoffIdleStrategy::new);
         m.cfg.errorHandler(Throwable::printStackTrace);
         System.out.println("[rig] member " + m.id + " boots with leader heartbeat timeout " + leaderHeartbeatTimeoutMs
-                + " ms (core.rig.heartbeat.ms default " + DEFAULT_LEADER_HEARTBEAT_TIMEOUT_MS + ")");
+                + " ms (core.rig.heartbeat.ms default " + DEFAULT_LEADER_HEARTBEAT_TIMEOUT_MS + "), snapshot term "
+                + System.getProperty(SNAPSHOT_TERM_LENGTH_PROPERTY));
         m.cfg.consensusModuleContext()
                 .ingressChannel(INGRESS_CHANNEL)
                 .logChannel("aeron:udp?term-length=" + logTermLength)
@@ -491,6 +511,7 @@ final class ShadowClusterRig implements AutoCloseable {
 
     @Override
     public void close() {
+        printCycleMaxima("at close");
         for (final Client c : clients) {
             CloseHelper.quietClose(c.session.client);
         }
@@ -506,6 +527,9 @@ final class ShadowClusterRig implements AutoCloseable {
         System.clearProperty("cluster.port.stride");
         System.clearProperty("core.node.port");
         System.clearProperty("snapshot.interval.minutes");
+        if (ownsSnapshotTermLength) {
+            System.clearProperty(SNAPSHOT_TERM_LENGTH_PROPERTY);
+        }
         ClusterPorts.resetStrideForTest();
     }
 
@@ -930,6 +954,7 @@ final class ShadowClusterRig implements AutoCloseable {
         }
         final AtomicCounter toggle = ClusterControl.findControlToggle(
                 leader.cfg.consensusModuleContext().aeron().countersReader(), leader.cfg.consensusModuleContext().clusterId());
+        printCycleMaxima("before a snapshot");
         if (!ClusterControl.ToggleState.SNAPSHOT.toggle(toggle)) {
             throw new AssertionError("the SNAPSHOT toggle was not accepted");
         }
@@ -941,8 +966,51 @@ final class ShadowClusterRig implements AutoCloseable {
             }
             return true;
         }, 120_000, "every live member must take the requested snapshot");
+        printCycleMaxima("after a snapshot");
         final List<long[]> mine = snapshots(leader);
         return mine.get(mine.size() - 1)[0];
+    }
+
+    /**
+     * The longest duty cycles each live member has recorded since its boot, in ms (Aeron's own counters): consensus
+     * module, service, archive and driver conductor, and the longest snapshot (the whole cluster snapshot, and the
+     * service's part). A consensus module cycle at or above the leader heartbeat timeout is a leader that sent no
+     * heartbeat for that long: the followers call an election. The values only rise, so the line at close is the worst
+     * of the story; the lines around a snapshot show which snapshot raised them.
+     */
+    void printCycleMaxima(final String when) {
+        final StringBuilder line = new StringBuilder("[rig] longest cycles " + when + " (heartbeat timeout "
+                + leaderHeartbeatTimeoutMs + " ms):");
+        for (final Member m : live()) {
+            try {
+                final CountersReader counters = m.cfg.consensusModuleContext().aeron().countersReader();
+                final long[] ns = new long[5];
+                counters.forEach((counterId, typeId, keyBuffer, label) -> {
+                    final int slot = switch (typeId) {
+                        case AeronCounters.CLUSTER_MAX_CYCLE_TIME_TYPE_ID -> 0;
+                        case AeronCounters.CLUSTER_CLUSTERED_SERVICE_MAX_CYCLE_TIME_TYPE_ID -> 1;
+                        case AeronCounters.ARCHIVE_MAX_CYCLE_TIME_TYPE_ID -> 2;
+                        case AeronCounters.CLUSTER_TOTAL_MAX_SNAPSHOT_DURATION_TYPE_ID -> 3;
+                        case AeronCounters.CLUSTERED_SERVICE_MAX_SNAPSHOT_DURATION_TYPE_ID -> 4;
+                        default -> -1;
+                    };
+                    if (slot >= 0) {
+                        ns[slot] = Math.max(ns[slot], counters.getCounterValue(counterId));
+                    }
+                });
+                final long conductorNs = counters.getCounterValue(AeronCounters.SYSTEM_COUNTER_ID_CONDUCTOR_MAX_CYCLE_TIME);
+                line.append(" member ").append(m.id).append(' ').append(m.role())
+                        .append(" consensus=").append(ns[0] / 1_000_000)
+                        .append(" service=").append(ns[1] / 1_000_000)
+                        .append(" archive=").append(ns[2] / 1_000_000)
+                        .append(" conductor=").append(conductorNs / 1_000_000)
+                        .append(" snapshot=").append(ns[3] / 1_000_000)
+                        .append(" serviceSnapshot=").append(ns[4] / 1_000_000).append(" ms;");
+            } catch (final RuntimeException e) {
+                line.append(" member ").append(m.id).append(" unreadable (").append(e).append(");");
+            }
+        }
+        System.out.println(line);
     }
 
     // ---------------------------------------------------------------------------------------------- shadows
