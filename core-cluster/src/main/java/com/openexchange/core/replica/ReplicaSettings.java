@@ -193,7 +193,7 @@ public final class ReplicaSettings {
     private java.util.Set<Integer> snapshotStreamIds;
     private final Map<Key, Long> numbers = new EnumMap<>(Key.class);
     private ReplicaConfig.DriverMode driverMode;
-    private boolean busySpin;
+    private ReplicaConfig.IdleMode idleMode;
     private ClusterBackup.SourceType sourceType;
     private List<String> memberHosts;
     private String replicaAddress;
@@ -265,15 +265,16 @@ public final class ReplicaSettings {
                 v -> ReplicaConfig.DriverMode.valueOf(v.toUpperCase(Locale.ROOT)));
         integer(Key.TRANSPORT_EXTERNAL_DRIVER_TIMEOUT_MS, ReplicaConfig.DEFAULT_EXTERNAL_DRIVER_TIMEOUT_MS, 1,
                 86_400_000L);
-        // The replica shares the members' TRANSPORT_IDLE_MODE. Its agents (the kit's ReplicaEngine) are either busy-spin
-        // or backoff: "sleep" (the members' small-host mode) runs the replica on backoff, never busy-spin.
-        busySpin = choice(Key.TRANSPORT_IDLE_MODE, "backoff", "busy_spin|backoff|sleep", v -> {
+        // The replica shares the members' TRANSPORT_IDLE_MODE and runs every one of its agents, its embedded driver and
+        // its archive on that mode: "sleep" is the 1 ms sleep of the members, not a backoff.
+        idleMode = choice(Key.TRANSPORT_IDLE_MODE, "backoff", "busy_spin|backoff|sleep", v -> {
             switch (v.toLowerCase(Locale.ROOT)) {
                 case "busy_spin":
-                    return Boolean.TRUE;
+                    return ReplicaConfig.IdleMode.BUSY_SPIN;
                 case "backoff":
+                    return ReplicaConfig.IdleMode.BACKOFF;
                 case "sleep":
-                    return Boolean.FALSE;
+                    return ReplicaConfig.IdleMode.SLEEP;
                 default:
                     throw new IllegalArgumentException(v);
             }
@@ -634,8 +635,8 @@ public final class ReplicaSettings {
         return driverMode;
     }
 
-    public boolean busySpin() {
-        return busySpin;
+    public ReplicaConfig.IdleMode idleMode() {
+        return idleMode;
     }
 
     public ClusterBackup.SourceType sourceType() {
@@ -705,7 +706,7 @@ public final class ReplicaSettings {
                 .driverMode(driverMode)
                 .aeronDir(aeronDir)
                 .externalDriverTimeoutMs(numeric(Key.TRANSPORT_EXTERNAL_DRIVER_TIMEOUT_MS))
-                .busySpin(busySpin)
+                .idleMode(idleMode)
                 .sourceType(sourceType)
                 .credentials(credentials.supplier())
                 .memberBackupWindowMs(numeric(Key.REPLICA_MEMBER_BACKUP_WINDOW_MS))

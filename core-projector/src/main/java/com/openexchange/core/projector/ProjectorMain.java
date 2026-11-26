@@ -54,8 +54,13 @@ public final class ProjectorMain {
     private static void run(final EngineLifecycle lifecycle) {
         final ProjectorConfig config = ProjectorConfig.fromEnv();
         final ProjectorDriver driverSettings = ProjectorDriver.fromEnv();
+        // Refused like an invalid PROJECTOR_DRIVER_MODE (exit 1 through startupFailed), before anything starts.
+        final ProjectorIdle.Mode idleMode = ProjectorIdle.fromEnv();
         final boolean external = driverSettings.mode == ProjectorDriver.Mode.EXTERNAL;
         System.out.println("[PROJECTOR] driver mode " + driverSettings);
+        System.out.println("[PROJECTOR] idle mode " + idleMode.name().toLowerCase(java.util.Locale.ROOT) + " ("
+                + ProjectorIdle.MODE_ENV + ")" + (external ? ": agent and archive clients (the external driver is not ours)"
+                : ": agent, archive clients and the embedded driver"));
         if (external) {
             driverSettings.awaitExternalDriver(lifecycle::stopRequested);
             System.out.println("[PROJECTOR] external media driver active at " + driverSettings.aeronDir);
@@ -82,11 +87,11 @@ public final class ProjectorMain {
 
             // Embedded: the projector's own driver, closed below. External: none; the aeronmd is not ours to close,
             // and each epoch's archive client connects to it at AERON_DIR.
-            driver = external ? null : MediaDriver.launch(new MediaDriver.Context()
+            driver = external ? null : MediaDriver.launch(ProjectorIdle.applyTo(new MediaDriver.Context()
                     .aeronDirectoryName("/dev/shm/aeron-projector-" + ProcessHandle.current().pid())
                     .threadingMode(ThreadingMode.SHARED)
                     .dirDeleteOnStart(true)
-                    .dirDeleteOnShutdown(true));
+                    .dirDeleteOnShutdown(true), idleMode));
             final String aeronDirectoryName = external ? driverSettings.aeronDir : driver.aeronDirectoryName();
 
             // The archive clients' errors go to the lifecycle, as the engines' do. With an external
@@ -97,7 +102,7 @@ public final class ProjectorMain {
                 System.err.println("[PROJECTOR] Aeron error: " + t);
                 lifecycle.onError(t, external);
             };
-            agent = new ProjectorAgent(config, aeronDirectoryName, state, store, aeronErrors);
+            agent = new ProjectorAgent(config, aeronDirectoryName, state, store, aeronErrors, idleMode);
             thread = new Thread(agent, "money-projector");
             thread.setDaemon(false);
             thread.start();
