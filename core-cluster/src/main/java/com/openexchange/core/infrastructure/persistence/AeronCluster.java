@@ -173,6 +173,11 @@ public final class AeronCluster {
         clusterConfig.memberCompat(own, com.openexchange.cluster.MemberCompat.fatalOnRefusal(lifecycle, build));
         com.openexchange.cluster.MemberCompat.bootCheck(lifecycle, clusterConfig.consensusModuleContext().clusterDir(),
                 own, build);
+        // The journal retention settings (JOURNAL_RETENTION_MONEY, _ORDER, the required readers, the poll, the pass
+        // budget and the two alarm bounds): a bad value refuses the start here, before anything is launched.
+        com.openexchange.cluster.journal.JournalRetention.Settings.fromEnv(
+                com.openexchange.core.infrastructure.journal.CoreJournalProfiles.MONEY_NAME,
+                com.openexchange.core.infrastructure.journal.CoreJournalProfiles.ORDER_NAME);
 
         log.info("Core node %d starting: portBase=%d driverMode=%s idle=%s memberCompat=%s %s",
                 nodeId, portBase, driverMode, TransportConfig.idleMode(), own, electionTiming);

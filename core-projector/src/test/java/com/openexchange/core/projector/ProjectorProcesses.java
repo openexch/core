@@ -256,6 +256,25 @@ final class ProjectorProcesses implements AutoCloseable {
             }
         }
 
+        /** The start position of the source's journal recording as its archive has it. */
+        long start() throws Exception {
+            final int before = count(Files.readString(log), "[SOURCE] start ");
+            command("start");
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (true) {
+                final String out = Files.readString(log);
+                if (count(out, "[SOURCE] start ") > before) {
+                    final int at = out.lastIndexOf("[SOURCE] start ") + "[SOURCE] start ".length();
+                    final int end = out.indexOf('\n', at);
+                    if (end > at) {
+                        return Long.parseLong(out.substring(at, end).trim());
+                    }
+                }
+                assertTrue("no start position from the source: " + out, System.nanoTime() < deadline && process.isAlive());
+                Thread.sleep(20);
+            }
+        }
+
         private void command(final String line) throws IOException {
             final OutputStream in = process.getOutputStream();
             in.write((line + "\n").getBytes(StandardCharsets.UTF_8));
@@ -290,13 +309,32 @@ final class ProjectorProcesses implements AutoCloseable {
         return startSource(dir("projector-src-restart-"), old.archiveDir, old.controlPort, old.last[0] + more, true);
     }
 
+    /**
+     * A fresh source that purges its own journal recording as a core member does: cluster-kit's journal retention
+     * thread in mode {@code readers}, a pass every second, the reader files under {@code clusterDir}.
+     */
+    Source startRetainingSource(final int initial, final Path clusterDir, final long genesisId) throws Exception {
+        final Path base = dir("projector-src-");
+        return startSource(base, base.resolve("archive"), ProjectorProcesses.freePort(), initial, false,
+                List.of("-Djournal.retention.money=readers", "-Djournal.retention.poll.ms=1000"),
+                List.of(clusterDir.toString(), String.valueOf(genesisId)));
+    }
+
     private Source startSource(final Path base, final Path archiveDir, final int port, final int initial,
                                final boolean keepArchive) throws Exception {
+        return startSource(base, archiveDir, port, initial, keepArchive, List.of(), List.of());
+    }
+
+    private Source startSource(final Path base, final Path archiveDir, final int port, final int initial,
+                               final boolean keepArchive, final List<String> jvmArgs, final List<String> moreArgs)
+            throws Exception {
         final Path aeronDir = shmName("projector-src-");
         final List<String> cmd = java(testClasspath(), base,
                 "-Daeron.term.buffer.sparse.file=true", "-Daeron.term.buffer.length=1m");
+        cmd.addAll(jvmArgs);
         cmd.addAll(List.of(JournalSourceMain.class.getName(), aeronDir.toString(), archiveDir.toString(),
                 String.valueOf(port), String.valueOf(initial), keepArchive ? "keep" : "fresh"));
+        cmd.addAll(moreArgs);
         final Path log = base.resolve("source.log");
         final Process p = start(new ProcessBuilder(cmd), log);
         awaitLine(p, log, "[SOURCE] recorded " + initial, 60_000);
@@ -354,9 +392,15 @@ final class ProjectorProcesses implements AutoCloseable {
 
     /** The production projector on the "core" database, reading {@code source}. */
     Projector projector(final Path base, final Source source, final Map<String, String> extraEnv) throws Exception {
+        return projector(base, source, extraEnv, "core");
+    }
+
+    /** The production projector on database {@code database} of the throwaway cluster. */
+    Projector projector(final Path base, final Source source, final Map<String, String> extraEnv,
+                        final String database) throws Exception {
         final ProcessBuilder pb = projectorBuilder(base, extraEnv);
         final Map<String, String> env = pb.environment();
-        env.put("PROJECTOR_POSTGRES_URL", jdbcUrl("core"));
+        env.put("PROJECTOR_POSTGRES_URL", jdbcUrl(database));
         env.put("PROJECTOR_CORE_JOURNAL_ARCHIVES", "localhost:" + source.controlPort);
         final Path log = base.resolve("projector-" + System.nanoTime() + ".log");
         final Process p = start(pb, log);

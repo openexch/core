@@ -497,6 +497,11 @@ public final class CoreClusteredService implements ClusteredService {
             com.openexchange.cluster.SnapshotCadence.fromEnv();
     // ...and what turns the snapshot into reclaimed disk on THIS node.
     private volatile com.openexchange.cluster.SnapshotLogPruner logPruner;
+    // The journal retention thread (kit): purges this member's money and order journal recordings behind their
+    // registered readers. Its own thread and archive session; it does not depend on the log pruner.
+    private volatile com.openexchange.cluster.journal.JournalRetentionAgent journalRetention;
+    // Why the journal retention thread did not start; null when it started (or onStart has not run yet).
+    private volatile String journalRetentionStartFailure;
     // Lazily connected archive client used only to confirm the snapshot recording landed on disk
     // before onTakeSnapshot returns (see awaitSnapshotRecorded). Cloned context: never shares lock
     // state with the cluster's own archive client. Closed in onTerminate.
@@ -571,6 +576,7 @@ public final class CoreClusteredService implements ClusteredService {
         publishRecorded();
         startNodeEndpoint();
         startDurability(cluster);
+        startJournalRetention(cluster);
         // Started, not ready: the snapshot is loaded but the log replay may
         // still be running. Readiness waits for current consensus and application evidence.
         readiness.started();
@@ -824,6 +830,16 @@ public final class CoreClusteredService implements ClusteredService {
                 return g.read(p == null ? null : p.offBoxWatermark());
             });
         }
+        // core_journal_retention_*{journal} and the per-reader series: rendered by the kit agent, whose reader label
+        // values are the files registered on this member
+        body.text(() -> {
+            final com.openexchange.cluster.journal.JournalRetentionAgent retention = journalRetention;
+            if (retention != null) {
+                return retention.renderMetrics("core");
+            }
+            return journalRetentionStartFailure == null ? ""
+                    : com.openexchange.cluster.journal.JournalRetentionAgent.renderNotStarted("core");
+        });
         body.counter("pruner_wakes_by_shadow_total", "Purge passes run because a shadow requested one", () -> {
             final com.openexchange.cluster.SnapshotLogPruner p = logPruner;
             return p == null ? 0 : p.wakesByShadow();
@@ -1056,6 +1072,47 @@ public final class CoreClusteredService implements ClusteredService {
                         com.openexchange.cluster.OffBoxWatermark.DEFAULT_STALE_MS);
     }
 
+    /**
+     * Start the journal retention thread: the kit's one purge owner for this member's money journal (stream 4101) and
+     * order journal (stream 4102) recordings, on its own thread with its own archive session. It runs whatever
+     * {@code SNAPSHOT_PRUNE_ENABLED} says, and with both journals' modes {@code off} (the default) it only lists the
+     * recordings so the bytes they hold are exported. The settings were checked at boot ({@code AeronCluster});
+     * the off-box bound is the member's {@code RETENTION_OFFBOX} mode and its watermark file, as the log pruner
+     * reads them.
+     */
+    private void startJournalRetention(final Cluster cluster) {
+        try {
+            final int clusterId = cluster.context().clusterId();
+            final org.agrona.concurrent.status.CountersReader counters = cluster.aeron().countersReader();
+            final com.openexchange.cluster.OffBoxWatermark.Mode offBoxMode = offBoxModeOverride != null
+                    ? offBoxModeOverride : com.openexchange.cluster.OffBoxWatermark.modeSetting();
+            final com.openexchange.cluster.journal.JournalRetentionAgent agent =
+                    new com.openexchange.cluster.journal.JournalRetentionAgent(cluster.context().clusterDir(),
+                            cluster.context().archiveContext().clone(),
+                            com.openexchange.cluster.journal.JournalReaders.ENGINE_CORE, clusterId,
+                            () -> publishedGenesisId,
+                            com.openexchange.cluster.journal.JournalRetention.Settings.fromEnv(
+                                    com.openexchange.core.infrastructure.journal.CoreJournalProfiles.MONEY_NAME,
+                                    com.openexchange.core.infrastructure.journal.CoreJournalProfiles.ORDER_NAME),
+                            com.openexchange.core.infrastructure.journal.CoreJournalProfiles.ALL)
+                            .offBox(offBoxMode, () -> {
+                                final int counterId = io.aeron.cluster.service.ClusterCounters.find(counters,
+                                        io.aeron.AeronCounters.CLUSTER_COMMIT_POSITION_TYPE_ID, clusterId);
+                                return counterId == org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID
+                                        ? -1 : counters.getCounterValue(counterId);
+                            });
+            agent.start();
+            journalRetention = agent;
+        } catch (final Throwable t) {
+            // loud and not fatal, as for the pruner: a member that cannot arm its retention still serves the ledger.
+            // The failure stays visible: core_journal_retention_agent_state 4 on /metrics and a line on /health.
+            journalRetentionStartFailure = "did not start: " + t;
+            System.err.println("CORE CRITICAL: journal retention did not start: this member will not reclaim the disk"
+                    + " of its money and order journal recordings: " + t);
+            t.printStackTrace();
+        }
+    }
+
     /** Set by {@code ClusterConfig.create} before launch: the port the probe endpoint binds. */
     void nodeEndpointPort(final int port) {
         this.nodeEndpointPort = port;
@@ -1111,7 +1168,7 @@ public final class CoreClusteredService implements ClusteredService {
      * detail line on every answer.
      */
     com.openexchange.cluster.NodeReadiness.Probe probe() {
-        final com.openexchange.cluster.NodeReadiness.Probe base = readiness.probe();
+        final com.openexchange.cluster.NodeReadiness.Probe base = withJournalRetention(readiness.probe());
         final com.openexchange.core.infrastructure.journal.OrderJournal j = orderJournal;
         if (j == null) {
             return base;
@@ -1124,6 +1181,19 @@ public final class CoreClusteredService implements ClusteredService {
                     "order-journal-stalled (ring above the alarm bound) " + base.detail() + journal);
         }
         return new com.openexchange.cluster.NodeReadiness.Probe(base.live(), base.ready(), base.detail() + journal);
+    }
+
+    /**
+     * The journal retention's hold in the detail line: a journal in mode {@code readers} that is held (no reader, a
+     * bad reader file, an unreadable tail), or a pass that fails. Live and ready are unchanged: a member that keeps
+     * its journal serves.
+     */
+    private com.openexchange.cluster.NodeReadiness.Probe withJournalRetention(
+            final com.openexchange.cluster.NodeReadiness.Probe base) {
+        final com.openexchange.cluster.journal.JournalRetentionAgent retention = journalRetention;
+        final String error = retention == null ? journalRetentionStartFailure : retention.lastError();
+        return error == null ? base : new com.openexchange.cluster.NodeReadiness.Probe(base.live(), base.ready(),
+                base.detail() + " journal-retention: " + error);
     }
 
     /**
@@ -1167,7 +1237,7 @@ public final class CoreClusteredService implements ClusteredService {
         } else {
             consensusReadiness.poll(cluster, nowNs);
         }
-        if (publishedGenesisId == 0 && (shadowHousekeeping != null || logPruner != null)) {
+        if (publishedGenesisId == 0 && (shadowHousekeeping != null || logPruner != null || journalRetention != null)) {
             // ADOPT seen: the floor may arm, and the off-box watermark can be matched to this member
             publishedGenesisId = new CoreShadowIdentity(engine).genesisId();
         }
@@ -1820,6 +1890,10 @@ public final class CoreClusteredService implements ClusteredService {
         if (consensusReadiness != null) { consensusReadiness.close(); }
         if (logPruner != null) {
             logPruner.stop();
+        }
+        final com.openexchange.cluster.journal.JournalRetentionAgent retention = journalRetention;
+        if (retention != null) {
+            retention.stop();
         }
         final MemberShadowHousekeeping hk = shadowHousekeeping;
         if (hk != null) {

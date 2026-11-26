@@ -136,6 +136,40 @@ java -cp core-cluster.jar com.openexchange.cluster.OffBoxWatermarkTool set --clu
 
 Turn it on only when every member runs a build that knows the setting: write the watermark on every member, then restart each with `RETENTION_OFFBOX=required`. To turn it off, `clear` the file on the member and restart with `off`; `off` with a file present refuses the start (exit 1).
 
+#### Journal retention (`JOURNAL_RETENTION_MONEY`, `JOURNAL_RETENTION_ORDER`)
+
+Each member keeps its money journal (stream 4101) and its order journal (stream 4102) as recordings in its own archive, and every process run opens a new recording. With the mode `readers` a member purges them itself, on its own thread (`journal-retention`, cluster-kit's `JournalRetention`): a record goes only when every registered reader has durably applied it, an active recording keeps two whole archive segments below its head, and a stopped recording of an earlier run is deleted whole once every reader has applied it and a newer recording has passed it. The tail the restore rules read is the same after a pass as before it. This does not depend on `SNAPSHOT_PRUNE_ENABLED`.
+
+| variable | default | meaning |
+|---|---|---|
+| `JOURNAL_RETENTION_MONEY`, `JOURNAL_RETENTION_ORDER` | `off` | `off`: nothing of that journal is ever purged. `report`: evaluated, logged and exported, nothing purged. `readers`: purge behind the registered readers |
+| `JOURNAL_RETENTION_REQUIRED_READERS_MONEY`, `JOURNAL_RETENTION_REQUIRED_READERS_ORDER` | empty | reader names, separated by commas, that must have a valid file on the member; one that has none holds the journal |
+| `JOURNAL_RETENTION_POLL_MS` | `60000` | the interval between two passes (1000..3600000) |
+| `JOURNAL_RETENTION_PASS_TIMEOUT_MS` | `10000` | the budget of one pass over one journal (1000..600000) |
+| `JOURNAL_RETENTION_ALARM_BYTES` | `2147483648` | bytes of one journal a member holds above which every pass prints a CRITICAL line; an alarm, not a limit (1048576..1099511627776) |
+| `JOURNAL_RETENTION_STALE_MS` | `3600000` | age of the oldest reader file above which every pass prints a CRITICAL line; it does not change the bound (1000..604800000) |
+
+A reader is registered by a file on each member (`<clusterDir>/retention/journal-readers/<money|order>/<reader>`), written by a command run on that member's host; this jar carries it:
+
+```
+java -cp core-cluster.jar com.openexchange.cluster.journal.JournalReaderTool set --cluster-dir <dir> --engine core --cluster-id <n> --genesis-id <g> --journal money|order --reader <name> --applied-journal-seq <s> --source <name>
+```
+
+The first `set` registers the reader (0 is legal) and is done before the reader first starts; later ones deliver its cursor: every record of this genesis with `journalSeq` at or below the value is durably applied by that reader. `release`, `remove` and `show` are the other commands; the file format, the states and the exit codes are in the cluster-kit README ("Journal retention"). A journal with no reader file, with an invalid or foreign file, or with a reader above the member's own journal tail is held: there is no wait and no give-up, so a reader that died holds the journal until an operator's `release` or `remove`. With `RETENTION_OFFBOX=required` no record is purged whose log position is above the off-box watermark. The money journal's records carry no epoch, so its identity is the reader file's genesis id against the member's; the order journal's records carry the genesis id and a recording of another genesis is never touched.
+
+`/ready` stays 200 while a member holds; under `readers` the hold is named in the detail line of `/health` (`journal-retention: ...`), on a CRITICAL line (`[JOURNAL-RETENTION] CRITICAL: ...`) and by the gauges, each labelled `journal="money"` or `journal="order"`: `core_journal_retention_mode`, `_state`, `_safe_seq`, `_tail_seq`, `_retained_bytes`, `_recordings`, `_recordings_foreign`, `_recordings_anomaly`, `_oldest_reader_age_ms`, `_purged_bytes_total`, `_purge_failures_total`, `_last_pass_age_ms`, and per reader `core_journal_retention_reader_applied_seq` and `_reader_released_seq`. `_retained_bytes` is exported under `off` too. The thread itself is `core_journal_retention_agent_state` (0 not running, 1 running, 2 the last pass failed, 3 dead until the member restarts, 4 did not start) with `core_journal_retention_pass_failures_total` per journal; one journal's failing pass does not stop the other's. `_recordings_anomaly` counts recordings that cannot be cut as far as their readers allow: a `journalSeq` that does not rise, or an unreadable record at the recording's start or at a segment base. A history reader that starts below what the members still hold (an empty projection database, a rebuild) finds a gap and stops: after retention the projection database is the only copy on the cluster's hosts of history below the bound.
+
+Turning it on, in this order, on a build every member runs:
+
+1. Roll every member with both modes unset (`off`): nothing changes, and `core_journal_retention_retained_bytes` and `core_journal_retention_agent_state` appear.
+2. Register every reader on every member (the first `set`, with its current cursor) and start whatever delivers the cursors.
+3. Set `JOURNAL_RETENTION_REQUIRED_READERS_MONEY` and `JOURNAL_RETENTION_REQUIRED_READERS_ORDER` to the registered reader names on every member, so a reader file that is lost holds the journal instead of releasing it.
+4. Set both modes to `report` on every member. Per member, `core_journal_retention_state` must be 0, `_safe_seq` must follow the readers' cursors, and the `report: would purge` lines must name what you expect.
+5. `JOURNAL_RETENTION_ORDER=readers` only once the order projector has been tested against a member that purges under it (a purged source is left for another, a resume position below a recording's new start is dropped). Until then the order journal stays at `report`. Start with one follower, since readers prefer followers, and watch the projector for a halt or a gap before the other members follow.
+6. `JOURNAL_RETENTION_MONEY` stays at `report` until it is confirmed on the installation that a genesis wipes the member's archive directory: the money journal's records carry no epoch, so recordings a previous genesis left in the same archive would be read as this genesis'.
+
+Alert on the gauges and on their absence: a series that is missing (a member on an older build, an endpoint that does not answer, an agent that did not start) must page like a bad value. At least: `core_journal_retention_agent_state` absent or not 1; `core_journal_retention_last_pass_age_ms` absent or above three poll intervals; under `readers`, `core_journal_retention_state` absent or not 0 or 2; `core_journal_retention_recordings_anomaly` above 0; `core_journal_retention_pass_failures_total` rising; and `core_journal_retention_mode` 0 with `_retained_bytes` above the alarm bound.
+
 ### Order journal
 
 Every member records one 216-byte record per order event (schema id 5, `core-common/src/main/resources/sbe/order-journal-schema.xml`) on stream 4102 in its own archive: journalSeq equals the event sequence, the epoch is the recorded CoreConfig genesis id, and each fill names its ME record. History readers follow it over the archive; the engine writes it after the event is applied, through a ring and a writer agent, so the service thread never waits on the archive while the ring has room.

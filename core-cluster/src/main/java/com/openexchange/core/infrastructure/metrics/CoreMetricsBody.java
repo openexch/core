@@ -20,6 +20,7 @@ public final class CoreMetricsBody {
     private final Map<String, LongSupplier> counters = new LinkedHashMap<>();
     private final Map<String, LongSupplier> gauges = new LinkedHashMap<>();
     private final Map<String, Labelled> labelledGauges = new LinkedHashMap<>();
+    private final java.util.List<java.util.function.Supplier<String>> texts = new java.util.ArrayList<>();
 
     /** One gauge family with one label: {@code name{label="v"} value} per entry, one HELP and TYPE line. */
     private record Labelled(String help, String label, String[] values, LongSupplier[] suppliers) { }
@@ -52,6 +53,16 @@ public final class CoreMetricsBody {
         return this;
     }
 
+    /**
+     * Series a component renders itself, HELP and TYPE lines included (families whose label values are not known at
+     * startup, such as the registered readers of a journal). The supplier runs per scrape on the endpoint's thread and
+     * answers whole lines, each ended by a line end, or an empty string.
+     */
+    public CoreMetricsBody text(final java.util.function.Supplier<String> rendered) {
+        texts.add(java.util.Objects.requireNonNull(rendered, "rendered"));
+        return this;
+    }
+
     /** Register a group of series (one appended chain call per registrar, critic 1.2 seam 1). */
     public CoreMetricsBody include(final java.util.function.Consumer<CoreMetricsBody> registrar) {
         registrar.accept(this);
@@ -76,6 +87,10 @@ public final class CoreMetricsBody {
                 sb.append(e.getKey()).append('{').append(l.label()).append("=\"").append(l.values()[i]).append("\"} ")
                         .append(l.suppliers()[i].getAsLong()).append('\n');
             }
+        }
+
+        for (final java.util.function.Supplier<String> text : texts) {
+            sb.append(text.get());
         }
 
         appendSeries(sb, "core_cluster_role Cluster role code (0 follower, 1 candidate, 2 leader)",
