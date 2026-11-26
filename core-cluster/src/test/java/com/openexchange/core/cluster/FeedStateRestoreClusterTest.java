@@ -198,6 +198,7 @@ public class FeedStateRestoreClusterTest {
         // the jar ships {1, 2}: every instance (the cold-restarted one included) is widened through the seam
         service.engine().coreConfig().setSupportedBehaviorVersions(1, 2, 3, 4);
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, PORT_BASE, service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(baseDir);
         cfg.aeronDirectoryName(aeronDir);
         cfg.idleStrategySupplier(BackoffIdleStrategy::new);

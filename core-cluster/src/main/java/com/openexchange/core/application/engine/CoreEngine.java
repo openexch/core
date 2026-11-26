@@ -902,6 +902,11 @@ public final class CoreEngine {
             new com.openexchange.core.application.engine.config.CoreConfigStateMachine();
     /** Node-local fail-fast hook for the CoreConfig cross-check; the service installs its halt. */
     private Runnable configFailFast = () -> { };
+    /**
+     * Node-local stop for the part of the cross-check a restart cannot fix (S4 R-A6: exit 78 on a member); null runs
+     * {@link #configFailFast}.
+     */
+    private Runnable configIncompatibleFailFast;
 
     public com.openexchange.core.application.engine.config.CoreConfigStateMachine coreConfig() {
         return coreConfig;
@@ -917,6 +922,15 @@ public final class CoreEngine {
     }
 
     /**
+     * The behaviour version of the recorded CoreConfig, 0 while none is recorded (the capability token
+     * {@code recorded_behavior=}; {@code coreConfig().behaviorVersion()} reads 1 then, the behaviour the engine runs).
+     */
+    public long recordedBehaviorVersion() {
+        final com.openexchange.core.domain.commands.CoreConfigCommand recorded = coreConfig.recorded();
+        return recorded == null ? 0L : recorded.behaviorVersion;
+    }
+
+    /**
      * The wire ceiling of the recorded CoreConfig, 0 while none is recorded. Replicated state, equal on every member;
      * the ingress gate and the {@code core_max_wire_version} gauge read it.
      */
@@ -926,6 +940,11 @@ public final class CoreEngine {
 
     public void setConfigFailFast(Runnable failFast) {
         this.configFailFast = failFast;
+    }
+
+    /** The stop for a recorded behaviour or wire ceiling this jar cannot run (S4 R-A6); null: {@link #setConfigFailFast}'s. */
+    public void setConfigIncompatibleFailFast(Runnable failFast) {
+        this.configIncompatibleFailFast = failFast;
     }
 
     /** CoreConfig (70), ADMIN class: contract section 3, then the node-local cross-check (section 4). */
@@ -1100,7 +1119,10 @@ public final class CoreEngine {
         if (mismatch != null) {
             LOG.error("CORE-CONFIG CRITICAL (%s): this node differs from the cluster's declared config: %s; exiting (fail-fast)",
                     context, mismatch);
-            configFailFast.run();
+            // a behaviour or ceiling this jar cannot run is not fixed by a restart (exit 78); the rest keeps its seam
+            final Runnable stop = coreConfig.crossCheckIncompatible() != null && configIncompatibleFailFast != null
+                    ? configIncompatibleFailFast : configFailFast;
+            stop.run();
         }
     }
 

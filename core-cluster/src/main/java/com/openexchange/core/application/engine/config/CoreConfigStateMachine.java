@@ -161,10 +161,11 @@ public final class CoreConfigStateMachine {
     }
 
     /**
-     * Node-local cross-check (section 4) against the compiled tables and this jar's supported behaviour versions.
-     * Null when it holds (or nothing is recorded), else the reason naming both sides.
+     * The part of {@link #crossCheck} a restart cannot fix (S4 R-A6): the jar does not run the recorded behaviour, or
+     * decodes less than the recorded wire ceiling. The node stops with exit 78 on it. Null when it holds (or nothing is
+     * recorded).
      */
-    public String crossCheck() {
+    public String crossCheckIncompatible() {
         if (recorded == null) {
             return null;
         }
@@ -172,9 +173,20 @@ public final class CoreConfigStateMachine {
             return "behaviorVersion " + recorded.behaviorVersion + " is not supported by this jar " + Arrays.toString(supported);
         }
         // A jar that decodes less than the recorded ceiling cannot follow the log
-        final String wire = WireCeiling.jarBelow(recorded.maxWireVersion, supportedMaxWire, "money-schema");
-        if (wire != null) {
-            return wire;
+        return WireCeiling.jarBelow(recorded.maxWireVersion, supportedMaxWire, "money-schema");
+    }
+
+    /**
+     * Node-local cross-check (section 4) against the compiled tables and this jar's supported behaviour versions.
+     * Null when it holds (or nothing is recorded), else the reason naming both sides.
+     */
+    public String crossCheck() {
+        if (recorded == null) {
+            return null;
+        }
+        final String incompatible = crossCheckIncompatible();
+        if (incompatible != null) {
+            return incompatible;
         }
         if (recorded.markets.length != Market.ALL.length) {
             return "declared " + recorded.markets.length + " markets, compiled " + Market.ALL.length;

@@ -45,6 +45,7 @@ public class ApplierOwnershipGuardTest {
             "accountCount", "getLastAppliedTradeId", "getConsumePosition", "getJournalSeq", "isMoneyJournalEnabled",
             "getEventSeq", "recordedGenesisId", // the order journal checks and gauges read the event sequence and genesis
             "recordedMaxWireVersion", // the wire ceiling gauge
+            "recordedBehaviorVersion", // the capability tokens of /ready (S4)
             "getSettleFaultCount", "getSuppressedFeedReleaseCount", "getExhaustedHoldsReaped", "getSettleRejectCount",
             "getLastLogTime", "sessions().size", "gate().state", "deadlines().size", "deadlines().isEmpty",
             "forEachAccountByUserId", "orders().orders", "metricsView"); // The read-only metrics view

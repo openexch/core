@@ -333,7 +333,11 @@ public class ShadowEquivalenceClusterTest {
             // (6) the splice runner on the recorded log with the production applier
             final LogSpliceRunner.Report splice = LogSpliceRunner.run(() -> new CoreLogApplier(() -> {
                 throw new AssertionError("the recorded log must not trip the CoreConfig stop");
-            }), log, LogSpliceRunner.Cuts.actions(), e -> List.of());
+            }), log, LogSpliceRunner.Cuts.actions(), e -> List.of(),
+                    com.openexchange.core.infrastructure.persistence.CoreMemberCompat.MEMBER_COMPAT.appVersion(),
+                    com.openexchange.cluster.MemberCompat.validator(
+                            com.openexchange.core.infrastructure.persistence.CoreMemberCompat.MEMBER_COMPAT,
+                            (own, other) -> { throw new AssertionError(own + " refused " + other); }));
             if (splice.comparisons() < splice.cuts()) {
                 throw new AssertionError("vacuous: " + splice.comparisons() + " comparisons for " + splice.cuts()
                         + " cuts");

@@ -64,6 +64,15 @@ public final class ClusterConfig {
     private final AeronArchive.Context aeronArchiveContext;
     private final ConsensusModule.Context consensusModuleContext;
     private final List<ClusteredServiceContainer.Context> clusteredServiceContexts;
+    /** The member version every context carries ({@link #memberCompat}); {@link CoreMemberCompat#own()} by default. */
+    private com.openexchange.cluster.MemberCompat memberCompat = CoreMemberCompat.own();
+    /**
+     * What a refusal by the validator does. Fail closed until the node installs the lifecycle's exit 78 (or a rig its
+     * explicit test refusal): {@code NOT_INSTALLED} refuses every version.
+     */
+    private com.openexchange.cluster.MemberCompat.Refusal memberCompatRefusal =
+            com.openexchange.cluster.MemberCompat.NOT_INSTALLED;
+    private ClusteredService clusteredService;
 
     ClusterConfig(
             final int memberId,
@@ -237,9 +246,38 @@ public final class ClusterConfig {
             serviceContexts.add(additionalServiceContext);
         }
 
-        return new ClusterConfig(
+        final ClusterConfig config = new ClusterConfig(
                 memberId, ingressHostname, hostname, mediaDriverContext, archiveContext,
                 aeronArchiveContext, consensusModuleContext, serviceContexts);
+        config.clusteredService = clusteredService;
+        config.applyMemberCompat();
+        return config;
+    }
+
+    /**
+     * The member version and what a refusal does (S4 R-A3): the consensus module and every service container carry
+     * {@code own}'s app version and one kit validator (one instance, so the {@code member-compat.seen} file in the
+     * cluster directory has one writer per process). The node passes {@code MemberCompat.fatalOnRefusal} (exit 78);
+     * rigs may pass their own. Applied again by {@link #baseDir}, so the validator's file follows the final directory.
+     */
+    public void memberCompat(final com.openexchange.cluster.MemberCompat own,
+                             final com.openexchange.cluster.MemberCompat.Refusal onRefusal) {
+        this.memberCompat = java.util.Objects.requireNonNull(own, "own");
+        this.memberCompatRefusal = java.util.Objects.requireNonNull(onRefusal, "onRefusal");
+        applyMemberCompat();
+    }
+
+    public com.openexchange.cluster.MemberCompat memberCompat() {
+        return memberCompat;
+    }
+
+    private void applyMemberCompat() {
+        com.openexchange.cluster.MemberCompat.install(consensusModuleContext, clusteredServiceContexts, memberCompat,
+                memberCompatRefusal);
+        if (clusteredService instanceof CoreClusteredService engineService) {
+            // /ready reports the version the validator uses (compat=), never what a launcher asked for
+            engineService.memberCompat(memberCompat);
+        }
     }
 
     public static ClusterConfig create(
@@ -299,6 +337,7 @@ public final class ClusterConfig {
         this.archiveContext.archiveDir(new File(baseDir, ARCHIVE_SUB_DIR));
         this.consensusModuleContext.clusterDir(new File(baseDir, CLUSTER_SUB_DIR));
         this.clusteredServiceContexts.forEach((ctx) -> ctx.clusterDir(new File(baseDir, CLUSTER_SUB_DIR)));
+        applyMemberCompat();
     }
 
     /**

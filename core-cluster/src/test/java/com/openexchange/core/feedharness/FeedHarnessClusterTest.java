@@ -95,6 +95,7 @@ public class FeedHarnessClusterTest {
         for (int i = 0; i < n; i++) {
             final Member m = new Member(i);
             m.cfg = ClusterConfig.create(i, hosts, hosts, portBase, new CoreClusteredService());
+            m.cfg.memberCompat(m.cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
             m.cfg.baseDir(new File(tmp, "node" + i));
             m.cfg.aeronDirectoryName(new File(tmp, "driver" + i).getAbsolutePath());
             m.cfg.idleStrategySupplier(BackoffIdleStrategy::new);

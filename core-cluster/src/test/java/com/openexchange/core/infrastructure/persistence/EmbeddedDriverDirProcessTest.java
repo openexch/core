@@ -82,6 +82,7 @@ public class EmbeddedDriverDirProcessTest {
             for (int attempt = 1; attempt <= 20; attempt++) {
                 final ClusterConfig cfg = ClusterConfig.create(0, List.of("localhost"), List.of("localhost"),
                         freePort(), new CoreClusteredService(SnapshotModeSettings.defaults()));
+                cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
                 cfg.aeronDirectoryName(driverDir);
                 cfg.baseDir(base.resolve("state-" + attempt).toFile());
                 AutoCloseable took = null;

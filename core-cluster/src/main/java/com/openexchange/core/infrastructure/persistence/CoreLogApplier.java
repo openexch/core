@@ -81,6 +81,17 @@ public final class CoreLogApplier implements ShadowEngine {
         engine.setEventSink(NoopCoreEventSink.INSTANCE);
     }
 
+    /**
+     * @param configFailFast             the node-local stop for a CoreConfig cross-check failure; required
+     * @param configIncompatibleFailFast the stop for the part a restart cannot fix: a recorded behaviour or wire
+     *                                   ceiling this jar cannot run (S4 R-A6, exit 78 on a member); required
+     */
+    public CoreLogApplier(final Runnable configFailFast, final Runnable configIncompatibleFailFast) {
+        this(configFailFast);
+        engine.setConfigIncompatibleFailFast(Objects.requireNonNull(configIncompatibleFailFast,
+                "configIncompatibleFailFast"));
+    }
+
     // ---------------------------------------------------------------- node-local wiring, never replicated state
 
     public void setEventSink(final CoreEventSink sink) {

@@ -433,6 +433,7 @@ final class ShadowClusterRig implements AutoCloseable {
             m.beforeLaunch.accept(m.service);
         }
         m.cfg = ClusterConfig.create(m.id, hosts, hosts, portBase, m.service);
+        m.cfg.memberCompat(m.cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         m.cfg.baseDir(m.baseDir);
         m.cfg.aeronDirectoryName(m.driverDir);
         m.cfg.idleStrategySupplier(BackoffIdleStrategy::new);

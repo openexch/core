@@ -280,6 +280,7 @@ public class SnapshotChunkedRestoreClusterTest {
         final CoreClusteredService service = new CoreClusteredService();
         TestAuth.install();
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, PORT_BASE, service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(baseDir);
         cfg.aeronDirectoryName(aeronDir);
         cfg.idleStrategySupplier(BackoffIdleStrategy::new);

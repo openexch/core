@@ -111,6 +111,7 @@ final class CoreRestoreRig {
         }
         final List<String> hosts = List.of("localhost");
         final ClusterConfig cfg = ClusterConfig.create(0, hosts, PORT_BASE, service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(baseDir);
         cfg.aeronDirectoryName(aeronDir);
         cfg.idleStrategySupplier(BackoffIdleStrategy::new);

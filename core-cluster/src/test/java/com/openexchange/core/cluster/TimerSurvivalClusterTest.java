@@ -238,6 +238,7 @@ public class TimerSurvivalClusterTest {
         m.service = new TimerProbeService(id);
         TestAuth.install();
         final ClusterConfig cfg = ClusterConfig.create(id, hosts, hosts, PORT_BASE, m.service);
+        cfg.memberCompat(cfg.memberCompat(), com.openexchange.cluster.MemberCompat.testRefusal("rig"));
         cfg.baseDir(new File(tmp, "node" + id));
         cfg.aeronDirectoryName(new File(tmp, "driver" + id).getAbsolutePath());
         cfg.idleStrategySupplier(BackoffIdleStrategy::new);
