@@ -167,9 +167,9 @@ public class ReplicaSettingsTest {
         assertEquals(ReplicaConfig.DriverMode.EMBEDDED, with("TRANSPORT_DRIVER_MODE", "EMBEDDED").driverMode());
         assertEquals("TRANSPORT_DRIVER_MODE 'shared' (expected external|embedded)",
                 refusal("TRANSPORT_DRIVER_MODE", "shared"));
-        assertTrue(with("TRANSPORT_IDLE_MODE", "busy_spin").busySpin());
-        assertFalse(with("TRANSPORT_IDLE_MODE", "backoff").busySpin());
-        assertFalse(with("TRANSPORT_IDLE_MODE", "sleep").busySpin());
+        assertEquals(ReplicaConfig.IdleMode.BUSY_SPIN, with("TRANSPORT_IDLE_MODE", "busy_spin").idleMode());
+        assertEquals(ReplicaConfig.IdleMode.BACKOFF, with("TRANSPORT_IDLE_MODE", "backoff").idleMode());
+        assertEquals(ReplicaConfig.IdleMode.SLEEP, with("TRANSPORT_IDLE_MODE", "sleep").idleMode());
         assertEquals("TRANSPORT_IDLE_MODE 'yield' (expected busy_spin|backoff|sleep)",
                 refusal("TRANSPORT_IDLE_MODE", "yield"));
         assertEquals(ClusterBackup.SourceType.LEADER, with("REPLICA_BACKUP_SOURCE", "leader").sourceType());
@@ -183,7 +183,7 @@ public class ReplicaSettingsTest {
     public void defaultsAreTheSectionElevenValues() {
         final ReplicaSettings s = with();
         assertEquals(ReplicaConfig.DriverMode.EMBEDDED, s.driverMode());
-        assertFalse("backoff", s.busySpin());
+        assertEquals("backoff", ReplicaConfig.IdleMode.BACKOFF, s.idleMode());
         assertEquals(List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"), s.memberHosts());
         assertEquals(9300, s.numeric(ReplicaSettings.Key.CLUSTER_PORT_BASE));
         assertEquals(0, s.numeric(ReplicaSettings.Key.CLUSTER_PORT_STRIDE));

@@ -6,6 +6,7 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.IdleStrategy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,10 +62,13 @@ public final class ArchiveJournalSource implements AutoCloseable {
     private final String channelUri;
     private final int replayStreamId;
     private final String replayHost;
+    /** The archive client's idle strategy, also used by the replay endpoint wait; null = Aeron's default / spin. */
+    private final IdleStrategy idleStrategy;
 
     private ArchiveJournalSource(final AeronArchive archive, final String endpoint,
                                  final int controlStreamId, final int journalStreamId, final String channelUri,
-                                 final int replayStreamId, final String replayHost) {
+                                 final int replayStreamId, final String replayHost,
+                                 final IdleStrategy idleStrategy) {
         this.archive = archive;
         this.endpoint = endpoint;
         this.identity = new SourceIdentity(endpoint, controlStreamId, journalStreamId, channelUri);
@@ -72,6 +76,7 @@ public final class ArchiveJournalSource implements AutoCloseable {
         this.channelUri = channelUri;
         this.replayStreamId = replayStreamId;
         this.replayHost = replayHost;
+        this.idleStrategy = idleStrategy;
     }
 
     /**
@@ -118,18 +123,42 @@ public final class ArchiveJournalSource implements AutoCloseable {
             final String aeronDirectoryName,
             final String replayHost,
             final ErrorHandler errorHandler) {
+        return connectFirstHealthy(archiveEndpoints, controlStreamId, journalStreamId, channelUri, replayStreamId,
+                aeronDirectoryName, replayHost, errorHandler, null);
+    }
+
+    /**
+     * As above, with {@code idleStrategy} as the archive client's idle strategy (its blocking calls wait on it;
+     * Aeron's default is a backoff that spins and yields first) and as the wait of the replay endpoint resolution.
+     * {@code null} keeps Aeron's default and a spin wait (the settlement bridge's path). The strategy is used on the
+     * calling thread only.
+     */
+    public static ArchiveJournalSource connectFirstHealthy(
+            final List<String> archiveEndpoints,
+            final int controlStreamId,
+            final int journalStreamId,
+            final String channelUri,
+            final int replayStreamId,
+            final String aeronDirectoryName,
+            final String replayHost,
+            final ErrorHandler errorHandler,
+            final IdleStrategy idleStrategy) {
         final String host = replayHost == null || replayHost.isBlank() ? "localhost" : replayHost.trim();
         Exception last = null;
         for (final String endpoint : archiveEndpoints) {
             try {
-                final AeronArchive archive = AeronArchive.connect(new AeronArchive.Context()
+                final AeronArchive.Context archiveContext = new AeronArchive.Context()
                         .aeronDirectoryName(aeronDirectoryName)
                         .controlRequestChannel("aeron:udp?endpoint=" + endpoint.trim())
                         .controlRequestStreamId(controlStreamId)
                         .controlResponseChannel("aeron:udp?endpoint=" + host + ":0")
-                        .errorHandler(errorHandler));
+                        .errorHandler(errorHandler);
+                if (idleStrategy != null) {
+                    archiveContext.idleStrategy(idleStrategy);
+                }
+                final AeronArchive archive = AeronArchive.connect(archiveContext);
                 return new ArchiveJournalSource(archive, endpoint.trim(), controlStreamId, journalStreamId,
-                        channelUri, replayStreamId, host);
+                        channelUri, replayStreamId, host, idleStrategy);
             } catch (Exception e) {
                 last = e;
             }
@@ -206,7 +235,11 @@ public final class ArchiveJournalSource implements AutoCloseable {
                 CloseHelper.quietClose(sub);
                 throw new IllegalStateException("replay endpoint did not resolve within 10s");
             }
-            Thread.onSpinWait();
+            if (idleStrategy != null) {
+                idleStrategy.idle();
+            } else {
+                Thread.onSpinWait();
+            }
         }
         try {
             archive.startReplay(recording.recordingId(), fromPosition, length,

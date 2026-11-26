@@ -13,7 +13,6 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
-import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 
 import java.nio.ByteOrder;
@@ -82,7 +81,8 @@ public final class ProjectorAgent implements Runnable {
     private final JournalDepositDecoder depositDecoder = new JournalDepositDecoder();
     private final JournalWithdrawDecoder withdrawDecoder = new JournalWithdrawDecoder();
     private final JournalSettleDecoder settleDecoder = new JournalSettleDecoder();
-    private final IdleStrategy idle = new BackoffIdleStrategy();
+    private final ProjectorIdle.Mode idleMode;
+    private final IdleStrategy idle;
 
     /** Records projected this epoch but not yet committed (journalSeq order preserved). */
     private final List<MoneyJournalRecord> pending = new ArrayList<>();
@@ -117,7 +117,14 @@ public final class ProjectorAgent implements Runnable {
     public ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
                           final ProjectorState state, final PostgresMoneyJournalStore store,
                           final ErrorHandler aeronErrorHandler) {
-        this(config, aeronDirectoryName, state, store, aeronErrorHandler, true, true);
+        this(config, aeronDirectoryName, state, store, aeronErrorHandler, ProjectorIdle.Mode.BACKOFF);
+    }
+
+    /** As above, idling on {@code idleMode} (the agent's and the archive clients' idle strategies). */
+    public ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
+                          final ProjectorState state, final PostgresMoneyJournalStore store,
+                          final ErrorHandler aeronErrorHandler, final ProjectorIdle.Mode idleMode) {
+        this(config, aeronDirectoryName, state, store, aeronErrorHandler, true, true, idleMode);
     }
 
     /** Tests only: {@code false} turns a money control off, to show that the control is what a test observes. */
@@ -125,6 +132,16 @@ public final class ProjectorAgent implements Runnable {
                    final ProjectorState state, final PostgresMoneyJournalStore store,
                    final ErrorHandler aeronErrorHandler, final boolean compareDuplicates,
                    final boolean switchSourceOnGap) {
+        this(config, aeronDirectoryName, state, store, aeronErrorHandler, compareDuplicates, switchSourceOnGap,
+                ProjectorIdle.Mode.BACKOFF);
+    }
+
+    private ProjectorAgent(final ProjectorConfig config, final String aeronDirectoryName,
+                           final ProjectorState state, final PostgresMoneyJournalStore store,
+                           final ErrorHandler aeronErrorHandler, final boolean compareDuplicates,
+                           final boolean switchSourceOnGap, final ProjectorIdle.Mode idleMode) {
+        this.idleMode = idleMode;
+        this.idle = ProjectorIdle.newStrategy(idleMode);
         this.config = config;
         this.aeronDirectoryName = aeronDirectoryName;
         this.state = state;
@@ -134,6 +151,11 @@ public final class ProjectorAgent implements Runnable {
         this.switchSourceOnGap = switchSourceOnGap;
     }
 
+    /** The idle strategy of the agent's follow loop (tests). */
+    IdleStrategy idleStrategy() {
+        return idle;
+    }
+
     public void stop() {
         running = false;
     }
@@ -141,7 +163,8 @@ public final class ProjectorAgent implements Runnable {
     @Override
     public void run() {
         System.out.println("[PROJECTOR] starting: aeJournalArchives=" + config.journalArchiveEndpoints
-                + " pg=" + config.postgresUrl + " haltOnGap=" + config.haltOnGap);
+                + " pg=" + config.postgresUrl + " haltOnGap=" + config.haltOnGap
+                + " idleMode=" + idleMode.name().toLowerCase(java.util.Locale.ROOT));
         while (running) {
             if (state.halted) {
                 // Parked (a gap on every source, a payload conflict, a refused version): keep the process
@@ -188,7 +211,8 @@ public final class ProjectorAgent implements Runnable {
                 ProjectorConfig.REPLAY_STREAM_ID,
                 aeronDirectoryName,
                 config.localHost,
-                aeronErrorHandler)) {
+                aeronErrorHandler,
+                ProjectorIdle.newStrategy(idleMode))) {
             currentSource = source.endpoint();
             state.journalSource = currentSource;
             followChain(source);
