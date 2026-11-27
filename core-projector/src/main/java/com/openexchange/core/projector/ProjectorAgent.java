@@ -36,12 +36,16 @@ import java.util.Set;
  *  - above the high-water and dense: projected (inserted in journalSeq order, committed in batches);
  *  - at or below the high-water (replay overlap, a restarted member's re-recorded journal): never
  *    inserted, always compared with its stored rows field for field; a difference (or no stored row)
- *    is a determinism fault and PARKS the projector with PAYLOAD_CONFLICT, never a silent skip;
+ *    is a determinism fault and PARKS the projector with PAYLOAD_CONFLICT, never a silent skip. The one
+ *    missing row that is accepted is one age-based retention deleted: at or below the mark its delete
+ *    wrote in the same transaction ({@link PostgresMoneyJournalStore.PrunedMark}); every other missing
+ *    row still parks;
  *  - past a dense gap: that source's fault while another configured source has not shown the same gap:
  *    everything below the gap is committed and the next epoch reads the next source; only a gap that
  *    every configured source shows at the same high-water PARKS the projector (a lost money movement);
  *  - of a journal version other than {@link #JOURNAL_VERSION}: PARKS the projector (a version 1 record
  *    has no log position; a later version is unknown to this build).
+ * A retention mark the login may not read PARKS it too (RETENTION_MARK).
  * A parked projector keeps serving /health and /metrics; a human decides, then restarts it.
  *
  * Source death is detected the same three ways as the settlement bridge, because a dead source
@@ -101,6 +105,8 @@ public final class ProjectorAgent implements Runnable {
     private final boolean compareDuplicates;
     /** True in production; a test control turns it off to show the source switch is what fills a one-member gap. */
     private final boolean switchSourceOnGap;
+    /** True in production; a test control turns it off to show the retention mark is what accepts a deleted row. */
+    private boolean acceptPruned = true;
 
     private volatile boolean running = true;
     private ProjectorFilter filter;
@@ -149,6 +155,12 @@ public final class ProjectorAgent implements Runnable {
         this.aeronErrorHandler = aeronErrorHandler;
         this.compareDuplicates = compareDuplicates;
         this.switchSourceOnGap = switchSourceOnGap;
+    }
+
+    /** Tests only: a duplicate whose rows retention deleted is a missing row like any other. Call before the start. */
+    ProjectorAgent withoutPrunedAccept() {
+        acceptPruned = false;
+        return this;
     }
 
     /** The idle strategy of the agent's follow loop (tests). */
@@ -522,7 +534,10 @@ public final class ProjectorAgent implements Runnable {
                 + "is unknown to this build. Nothing past it is projected.");
     }
 
-    /** Compare the queued duplicates with their stored rows; a difference or a missing row parks the projector. */
+    /**
+     * Compare the queued duplicates with their stored rows; a difference or a missing row parks the projector. A
+     * duplicate with no stored header row is accepted only when the retention mark, read after the rows, covers it.
+     */
     private void compareQueuedDuplicates() {
         if (duplicates.isEmpty()) {
             return;
@@ -532,8 +547,18 @@ public final class ProjectorAgent implements Runnable {
             seqs.add(r.journalSeq());
         }
         final Map<Long, MoneyJournalRecord> stored;
+        PostgresMoneyJournalStore.PrunedMark mark = null;
         try {
             stored = store.load(seqs);
+            for (final MoneyJournalRecord r : duplicates) {
+                if (!stored.containsKey(r.journalSeq())) {
+                    mark = readPrunedMark(r); // after the load: see PostgresMoneyJournalStore#prunedMark
+                    if (mark == null) {
+                        return; // parked
+                    }
+                    break;
+                }
+            }
         } catch (SQLException e) {
             state.pgFlushFailures++;
             state.connectedToPg = false;
@@ -542,18 +567,45 @@ public final class ProjectorAgent implements Runnable {
         }
         for (final MoneyJournalRecord r : duplicates) {
             final MoneyJournalRecord s = stored.get(r.journalSeq());
+            if (s == null && acceptPruned && mark != null && mark.covers(r)) {
+                state.prunedRecords++;
+                continue;
+            }
             if (!r.equals(s)) {
                 duplicates.clear();
                 state.payloadConflicts++;
                 park("PAYLOAD_CONFLICT", "*** HALTED - PAYLOAD_CONFLICT *** money journal record journalSeq="
                         + r.journalSeq() + " from source " + currentSource + " differs from what Postgres holds: "
-                        + "journal=" + r + " stored=" + (s == null ? "none (no row below the high-water)" : s)
+                        + "journal=" + r + " stored=" + (s == null ? "none (no row below the high-water, and not one "
+                        + "retention deleted: retention mark " + mark + ")" : s)
                         + " | a changed duplicate is a determinism fault: nothing is projected past it. Compare the "
                         + "members' money journals at this journalSeq, then restart the projector.");
                 return;
             }
         }
         duplicates.clear();
+    }
+
+    /**
+     * The retention mark for a duplicate with no stored row. A mark this login may not read is not a failure that a
+     * retry heals: it parks the projector (null), instead of an epoch that fails every second.
+     */
+    private PostgresMoneyJournalStore.PrunedMark readPrunedMark(final MoneyJournalRecord missing) throws SQLException {
+        try {
+            return store.prunedMark();
+        } catch (SQLException e) {
+            if (!PostgresMoneyJournalStore.INSUFFICIENT_PRIVILEGE.equals(e.getSQLState())) {
+                throw e;
+            }
+            duplicates.clear();
+            park("RETENTION_MARK", "*** HALTED - RETENTION MARK UNREADABLE *** money journal record journalSeq="
+                    + missing.journalSeq() + " from source " + currentSource + " has no stored row, and this login may "
+                    + "not read money_journal_pruned (" + e.getMessage() + "), so it cannot be told whether retention "
+                    + "deleted it. The retention migration must be applied as the projector's own login (the owner of "
+                    + "money_journal); fix the ownership or grant SELECT on money_journal_pruned, then restart the "
+                    + "projector.");
+            return null;
+        }
     }
 
     private void park(final String reason, final String text) {

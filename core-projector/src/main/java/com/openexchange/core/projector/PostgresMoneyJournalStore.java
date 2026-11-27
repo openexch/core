@@ -28,6 +28,10 @@ import java.util.Map;
  * A record at or below the high-water is not inserted at all: the agent compares it with
  * {@link #load stored rows} and halts on a difference.
  *
+ * Age-based retention (migration V003, {@code money_history_prune_v1}) deletes the oldest movements, never the newest:
+ * the high-water stays. {@link #prunedMark} is what that delete recorded, the one fact that lets the agent tell a row
+ * retention deleted from a row that is lost.
+ *
  * The canonical dump ({@link #CANONICAL_DUMP}, {@link #canonicalDump}) names every column that is a function of the
  * journal bytes, in a fixed order, ordered by primary key; {@link #WALL_CLOCK_COLUMNS} are the only columns it leaves
  * out. Two projections of one journal have equal canonical dumps.
@@ -77,6 +81,38 @@ public final class PostgresMoneyJournalStore {
             SELECT journal_seq, leg_no, user_id, asset_id, asset_role, balance_after, delta
             FROM money_journal_leg WHERE journal_seq = ANY (?) ORDER BY journal_seq, leg_no
             """;
+
+    /**
+     * The retention mark, only while the first stored journalSeq is right above it (one statement, one snapshot): that
+     * is what every delete leaves behind. A mark over a history that was emptied and rebuilt, or over rows that came
+     * back below it, answers nothing.
+     */
+    private static final String PRUNED_MARK = """
+            SELECT p.through_seq, p.max_before_ms FROM money_journal_pruned p
+            WHERE p.singleton AND p.through_seq + 1 = (SELECT MIN(j.journal_seq) FROM money_journal j)
+            """;
+    /** SQLSTATE undefined_table: a schema older than V003 has no retention mark, so nothing was deleted by it. */
+    private static final String UNDEFINED_TABLE = "42P01";
+    /** SQLSTATE insufficient_privilege: the mark exists and this login may not read it (V003 applied as another role). */
+    public static final String INSUFFICIENT_PRIVILEGE = "42501";
+
+    /**
+     * What age-based retention deleted: every journalSeq at or below {@code throughSeq} (a run without a hole from the
+     * first stored movement), each with a cluster time below {@code maxBeforeMs}, the greatest cutoff of a delete.
+     * {@link #NONE} when nothing was deleted.
+     */
+    public record PrunedMark(long throughSeq, long maxBeforeMs) {
+        public static final PrunedMark NONE = new PrunedMark(0, 0);
+
+        /**
+         * True when retention deleted the stored rows of {@code r}: its journalSeq is at or below the mark and its
+         * cluster time, when it has one (an opening balance has none), is below the greatest cutoff.
+         */
+        public boolean covers(final MoneyJournalRecord r) {
+            return r.journalSeq() >= 1 && r.journalSeq() <= throughSeq
+                    && (r.clusterTimeMs() == null || r.clusterTimeMs() < maxBeforeMs);
+        }
+    }
 
     private final HikariDataSource dataSource;
 
@@ -167,6 +203,25 @@ public final class PostgresMoneyJournalStore {
             }
         }
         return out;
+    }
+
+    /**
+     * The retention mark as committed now. Read it AFTER {@link #load}: the delete writes the mark in the transaction
+     * that removes the rows, so a row that was gone at the load is covered by a mark read later, and a mark read
+     * earlier could miss a delete that ran in between. A schema without the mark answers {@link PrunedMark#NONE}; a
+     * mark this login may not read throws ({@link #INSUFFICIENT_PRIVILEGE}), which the agent parks on.
+     */
+    public PrunedMark prunedMark() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(PRUNED_MARK);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? new PrunedMark(rs.getLong(1), rs.getLong(2)) : PrunedMark.NONE;
+        } catch (SQLException e) {
+            if (UNDEFINED_TABLE.equals(e.getSQLState())) {
+                return PrunedMark.NONE;
+            }
+            throw e;
+        }
     }
 
     /**

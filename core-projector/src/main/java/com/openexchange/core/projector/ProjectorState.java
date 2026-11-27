@@ -9,7 +9,10 @@ package com.openexchange.core.projector;
 public final class ProjectorState {
 
     public volatile boolean halted;
-    /** Why the projector parked (empty while it runs): a gap on every source, a payload conflict, a refused version. */
+    /**
+     * Why the projector parked (empty while it runs): a gap on every source, a payload conflict, a refused version, a
+     * retention mark its login may not read.
+     */
     public volatile String haltReason = "";
     /** True while a Postgres connection is usable (flips false on a flush failure / connect error). */
     public volatile boolean connectedToPg;
@@ -23,6 +26,8 @@ public final class ProjectorState {
     public volatile long duplicateRecords;
     /** Duplicates whose stored rows differed (or were missing): each one parks the projector. */
     public volatile long payloadConflicts;
+    /** Duplicates with no stored row that age-based retention deleted (at or below its mark): accepted, not compared. */
+    public volatile long prunedRecords;
     /** Epochs ended on a gap of one source so that the next source is read before parking. */
     public volatile long sourceSwitches;
     /** Records of a journal version this projector does not read (each one parks the projector). */
@@ -47,7 +52,7 @@ public final class ProjectorState {
                 + " epochHwm=" + epochHighWater
                 + " lastJournalSeq=" + lastJournalSeq
                 + " rowsProjected=" + rowsProjected + " duplicates=" + duplicateRecords
-                + " conflicts=" + payloadConflicts + " switches=" + sourceSwitches
+                + " conflicts=" + payloadConflicts + " pruned=" + prunedRecords + " switches=" + sourceSwitches
                 + " versionRefusals=" + versionRefusals
                 + " gaps=" + gapsDetected + (gapPending ? " gapPendingAbove=" + gapPendingHighWater : "")
                 + " epochs=" + epochs + " errors=" + errors

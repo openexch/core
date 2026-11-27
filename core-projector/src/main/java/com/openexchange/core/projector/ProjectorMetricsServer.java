@@ -88,6 +88,9 @@ public final class ProjectorMetricsServer {
         counter(sb, "projector_payload_conflicts_total",
                 "Duplicates that differed from their stored rows (a determinism fault) - MUST stay 0",
                 state.payloadConflicts);
+        counter(sb, "projector_pruned_records_total",
+                "Duplicates with no stored row because age-based retention deleted it (at or below its mark): accepted",
+                state.prunedRecords);
         counter(sb, "projector_source_switches_total",
                 "Gaps on one source answered by reading the next source before parking",
                 state.sourceSwitches);
