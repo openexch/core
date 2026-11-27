@@ -37,9 +37,16 @@ final class InProcessProjector implements AutoCloseable {
     InProcessProjector(final ProjectorProcesses procs, final String database, final List<String> endpoints,
                        final boolean compareDuplicates, final boolean switchSourceOnGap,
                        final long gapUnfilledParkMs) {
+        this(procs, database, endpoints, compareDuplicates, switchSourceOnGap, gapUnfilledParkMs, "core");
+    }
+
+    /** As above, with the projector logging in to Postgres as {@code user} (trust auth). */
+    InProcessProjector(final ProjectorProcesses procs, final String database, final List<String> endpoints,
+                       final boolean compareDuplicates, final boolean switchSourceOnGap,
+                       final long gapUnfilledParkMs, final String user) {
         final HikariConfig cfg = new HikariConfig();
         cfg.setJdbcUrl(procs.jdbcUrl(database));
-        cfg.setUsername("core");
+        cfg.setUsername(user);
         cfg.setMaximumPoolSize(2);
         cfg.setConnectionTimeout(5000);
         dataSource = new HikariDataSource(cfg);
@@ -48,7 +55,7 @@ final class InProcessProjector implements AutoCloseable {
                 .aeronDirectoryName(procs.shmName("projector-inproc-").toString())
                 .threadingMode(ThreadingMode.SHARED).termBufferSparseFile(true)
                 .dirDeleteOnStart(true).dirDeleteOnShutdown(true));
-        final ProjectorConfig config = new ProjectorConfig(endpoints, 10, procs.jdbcUrl(database), "core", "", true, 0,
+        final ProjectorConfig config = new ProjectorConfig(endpoints, 10, procs.jdbcUrl(database), user, "", true, 0,
                 "localhost", gapUnfilledParkMs);
         agent = new ProjectorAgent(config, driver.aeronDirectoryName(), state, store, null, compareDuplicates,
                 switchSourceOnGap);
