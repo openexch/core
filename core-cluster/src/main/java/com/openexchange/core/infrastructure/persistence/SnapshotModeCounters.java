@@ -36,7 +36,11 @@ public final class SnapshotModeCounters {
         /** Housekeeping journal-tail reads (only with a STUB newest group and a VERIFIED shadow above P_cm). */
         JOURNAL_TAIL_READS_TOTAL("core_journal_tail_reads_total"),
         /** Housekeeping wakes that did not read the journal tail because the floor would not consult it. */
-        JOURNAL_TAIL_READS_SKIPPED_TOTAL("core_journal_tail_reads_skipped_total");
+        JOURNAL_TAIL_READS_SKIPPED_TOTAL("core_journal_tail_reads_skipped_total"),
+        /** How long the last money journal tail read took (a restore's, over all its attempts, or the housekeeping's). */
+        JOURNAL_TAIL_READ_MS("core_journal_tail_read_ms"),
+        /** Money journal tail reads a restore ran again after one ran out of time, resuming where it stopped. */
+        JOURNAL_TAIL_READ_RETRIES_TOTAL("core_journal_tail_read_retries_total");
 
         private final String metricName;
 

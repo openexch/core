@@ -775,15 +775,32 @@ public final class ReplicaSettings {
     }
 
     /**
-     * The puller's CRITICAL boot lines ({@code shadow puller disabled: ...}, a kinds widening), printed by the main
-     * next to {@link #warnings}.
+     * The puller's CRITICAL boot lines (a kinds widening), printed by the main next to {@link #warnings}. The
+     * disabled puller is not one of them on a replica: see {@link #pullDisabledWarnings}.
      */
     List<String> pullWarnings() {
         final List<String> out = new ArrayList<>();
         for (final String line : shared.pullSettings().criticalLines()) {
-            out.add("CRITICAL " + line);
+            if (!com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE.equals(line)) {
+                out.add("CRITICAL " + line);
+            }
         }
         return out;
+    }
+
+    /**
+     * The puller's WARNING line of an empty {@code SHADOW_PULL_SOURCES}: not a fault at boot (a replica writes its own
+     * shadows and follows the members' log, so it runs without a source), but its self-recovery is off. A replica
+     * pulls only to start, or to start over, behind a log the members already pruned; without a source it refuses
+     * there and stays down until an operator acts, and while it is down under {@code SHADOW_ANCHOR_RULE=two-producers}
+     * the members lose their second producer and stop purging their logs.
+     */
+    List<String> pullDisabledWarnings() {
+        return shared.pullSettings().enabled() ? List.of()
+                : List.of(com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE
+                        + " (self-recovery is off: a replica behind the members' pruned log refuses and stays down"
+                        + " until an operator acts, and under SHADOW_ANCHOR_RULE=two-producers the members then stop"
+                        + " purging their logs)");
     }
 
     /** The BASE_DIR tmpfs warning only (the kit prints the window lines itself at launch). */

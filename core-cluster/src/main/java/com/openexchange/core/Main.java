@@ -29,7 +29,10 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        // First: a deployment written for the retired names refuses before any setting is read.
+        // First, for the member and the replica: every line this process writes starts with its time (ISO-8601, UTC,
+        // milliseconds), whoever writes it: the logger, the [TAG] lines on System.out and System.err, a library.
+        com.openexchange.cluster.LogTimestamps.install();
+        // Then: a deployment written for the retired names refuses before any setting is read.
         com.openexchange.core.config.RetiredSettings.refuseRetired("core-cluster.jar");
         final Role role;
         try {

@@ -146,6 +146,8 @@ public class ReplicaExternalDriverProcessTest {
                         + " B) equals " + r.rig.live().size() + " members' images; driver " + driver.kind + "; "
                         + ReplicaChild.line(first.out(), "Driver mode EXTERNAL"));
 
+                assertReplicaLogLines(first);
+
                 // 2. SIGTERM -> 143, nothing left open
                 r.traffic(10, 2);
                 first.process.destroy(); // SIGTERM
@@ -214,6 +216,40 @@ public class ReplicaExternalDriverProcessTest {
                 }
             }
         }
+    }
+
+    /**
+     * The log of a healthy replica without pull sources: every line carries its time (or continues the line above
+     * it), the empty source list is a warning (self-recovery is off) and not a fault, and an armed watchdog is information.
+     */
+    private static void assertReplicaLogLines(final ReplicaChild replica) throws Exception {
+        final String time = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z ";
+        final String all = replica.out() + "\n" + replica.err();
+        int stamped = 0;
+        int disabled = 0;
+        int armed = 0;
+        for (final String line : all.split("\n")) {
+            if (line.contains("shadow puller disabled")) {
+                disabled++;
+                assertTrue(line, line.matches(time + "\\[WARN \\] CoreShadowReplicaMain - shadow puller disabled:"
+                        + " SHADOW_PULL_SOURCES is empty \\(.*"));
+            }
+            if (line.contains("watchdog armed")) {
+                armed++;
+                assertTrue(line, line.matches(time + "\\[INFO \\] CoreShadowReplicaMain - Core replica .*"));
+            }
+            assertFalse("a line with two times: " + line, line.matches(time + time + ".*"));
+            final boolean hasTime = line.matches(time + ".*");
+            stamped += hasTime ? 1 : 0;
+            assertTrue("a line without its time: " + line, hasTime || line.isEmpty() || line.startsWith("Picked up ")
+                    || line.startsWith("WARNING: ") || line.startsWith("\t") || line.startsWith(" ")
+                    || line.startsWith("Caused by: ") || line.startsWith("Suppressed: "));
+        }
+        assertTrue("lines were written: " + stamped, stamped > 10);
+        assertEquals("the empty source list is said once" + replica.tails(), 1, disabled);
+        assertFalse("no error line on a healthy replica" + replica.tails(), all.contains("[ERROR]"));
+        System.out.println("GREEN replica log lines: " + stamped + " lines with their time, the disabled puller at"
+                + " WARN, " + armed + " armed watchdog lines at INFO, no [ERROR] line");
     }
 
     /**

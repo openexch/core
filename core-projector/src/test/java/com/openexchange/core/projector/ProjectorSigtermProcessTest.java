@@ -73,6 +73,15 @@ public class ProjectorSigtermProcessTest {
         assertEquals("SIGTERM exit status (128 + 15) after the shutdown hook: " + out, 143, projector.exitValue());
         assertTrue("prompt, not the hook's 5 s join bound (" + ms + " ms): " + out, ms < 3_000);
         assertTrue("the agent stopped cleanly: " + out, out.contains("[PROJECTOR] stopped."));
+        // every line of the process starts with its time (ISO-8601, UTC, milliseconds), once
+        assertTrue("the stop line carries its time: " + out, out.lines().anyMatch(l -> l.matches(
+                "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z \\[PROJECTOR\\] stopped\\..*")));
+        for (final String line : out.split("\n")) {
+            assertTrue("a line without its time: " + line, line.isEmpty()
+                    || line.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z (?!\\d{4}-\\d{2}-\\d{2}T).*")
+                    || line.startsWith("Picked up ") || line.startsWith("WARNING: ") || line.startsWith("\t")
+                    || line.startsWith(" ") || line.startsWith("Caused by: ") || line.startsWith("Suppressed: "));
+        }
         assertFalse(out, out.contains("ShutdownSignalBarrier hasn't terminated"));
         assertFalse("the embedded driver removed its dir", Files.exists(Path.of("/dev/shm/aeron-projector-" + projectorPid)));
     }

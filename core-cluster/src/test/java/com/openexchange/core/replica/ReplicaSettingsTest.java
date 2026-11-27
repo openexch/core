@@ -719,8 +719,12 @@ public class ReplicaSettingsTest {
         assertEquals(2, d.config().rebootstrapKeep());
         assertEquals(60_000L, d.config().rebootstrapNotTakenLogMs());
         assertEquals(false, d.config().pullSettings().enabled());
-        assertTrue("an empty source list is a CRITICAL line: " + d.pullWarnings(), d.pullWarnings().contains(
-                "CRITICAL " + com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE));
+        assertEquals("an empty source list is a warning on a replica, never a CRITICAL line", List.of(),
+                d.pullWarnings());
+        assertEquals(1, d.pullDisabledWarnings().size());
+        assertTrue(d.pullDisabledWarnings().toString(), d.pullDisabledWarnings().get(0).startsWith(
+                com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE + " (self-recovery is off: "));
+        assertTrue(d.pullDisabledWarnings().toString(), !d.pullDisabledWarnings().get(0).contains("CRITICAL"));
 
         // the pull rows are the member table's (one kit parser), handed to the kit config
         final ReplicaSettings pulling = with("SHADOW_PULL_SOURCES", "10.0.0.1:9301,10.0.0.2:9301",
@@ -729,6 +733,7 @@ public class ReplicaSettingsTest {
         assertEquals("[10.0.0.1:9301, 10.0.0.2:9301]", pulling.config().pullSettings().sources().toString());
         assertEquals("10.0.0.9:9450", pulling.config().pullSettings().replicationEndpoint().text());
         assertEquals("10.0.0.9:9451", pulling.config().pullSettings().responseEndpoint().text());
+        assertEquals("with sources there is no such warning", List.of(), pulling.pullDisabledWarnings());
         assertEquals(1000, pulling.config().pullSettings().startupWaitMs());
         assertEquals("SHADOW_PULL_PERIOD_MS must be 500..3600000 ms: 100", refusal("SHADOW_PULL_PERIOD_MS", "100"));
         assertEquals("SHADOW_PULL_SOURCES entry 'x' is not host:port", refusal("SHADOW_PULL_SOURCES", "x"));

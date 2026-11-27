@@ -2,6 +2,7 @@
 package com.openexchange.core.infrastructure.persistence;
 
 import com.openexchange.core.infrastructure.journal.OrderJournalTail;
+import com.openexchange.core.infrastructure.journal.TailReadBudget;
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
 import org.agrona.concurrent.NanoClock;
@@ -22,8 +23,9 @@ import java.util.concurrent.TimeUnit;
  *   for the reader).</li>
  * </ul>
  *
- * <p>The tail is read through this member's own archive only (bounded by {@code SHADOW_LOAD_TIMEOUT_MS}), and only
- * recordings whose last record carries the image's genesis count.</p>
+ * <p>The tail is read through this member's own archive only (bounded by {@code SHADOW_LOAD_TIMEOUT_MS}, every replay
+ * held to the member's {@link TailReadBudget}), and only recordings whose last record carries the image's genesis
+ * count.</p>
  */
 public final class OrderJournalRestoreRule {
 
@@ -51,12 +53,22 @@ public final class OrderJournalRestoreRule {
     private final long timeoutNs;
     private final Holes holes;
     private final boolean enabled;
+    private final TailReadBudget budget;
 
+    /** A rule whose reads are not held to a replay budget: for tests. A member passes its {@link TailReadBudget}. */
     public OrderJournalRestoreRule(final NanoClock clock, final long timeoutMs, final Holes holes) {
-        this(clock, timeoutMs, holes, true);
+        this(clock, timeoutMs, TailReadBudget.unbounded(), holes, true);
     }
 
-    private OrderJournalRestoreRule(final NanoClock clock, final long timeoutMs, final Holes holes, final boolean enabled) {
+    /** @param budget the member's one tail read budget; every read of the local tail waits for room in it */
+    public OrderJournalRestoreRule(final NanoClock clock, final long timeoutMs, final TailReadBudget budget,
+                                   final Holes holes) {
+        this(clock, timeoutMs, budget, holes, true);
+    }
+
+    private OrderJournalRestoreRule(final NanoClock clock, final long timeoutMs, final TailReadBudget budget,
+                                    final Holes holes, final boolean enabled) {
+        this.budget = java.util.Objects.requireNonNull(budget, "budget");
         this.clock = clock;
         this.timeoutNs = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         this.holes = holes == null ? Holes.NONE : holes;
@@ -68,7 +80,8 @@ public final class OrderJournalRestoreRule {
      * one in {@code AeronCluster}): there is no journal to be behind, so it neither refuses a SKIP nor declares a hole.
      */
     public static OrderJournalRestoreRule withoutJournal() {
-        return new OrderJournalRestoreRule(org.agrona.concurrent.SystemNanoClock.INSTANCE, 0, Holes.NONE, false);
+        return new OrderJournalRestoreRule(org.agrona.concurrent.SystemNanoClock.INSTANCE, 0,
+                TailReadBudget.unbounded(), Holes.NONE, false);
     }
 
     /** The local tail of {@code genesisId}'s journal against the image's {@code eventSeq}. */
@@ -76,7 +89,7 @@ public final class OrderJournalRestoreRule {
         if (eventSeq <= 0) {
             return new Verdict(false, 0L, eventSeq, "image has no order event");
         }
-        final OrderJournalTail reader = new OrderJournalTail(aeron, archive, clock, genesisId);
+        final OrderJournalTail reader = new OrderJournalTail(aeron, archive, clock, genesisId, budget);
         if (epochFilterOff) {
             reader.epochFilterOff();
         }

@@ -31,6 +31,9 @@ public class RetiredSettingsProcessTest {
     private static final String PROPERTY_LINE = "FATAL: core-cluster.jar refused to start: the system property"
             + " assets.node.port is retired; it is now core.node.port (rename the setting; the old name is never read)";
 
+    /** The time every line of the member starts with (ISO-8601, UTC, milliseconds) and the space after it. */
+    private static final String TIME = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z ";
+
     /** Entry point sources (relative to the reactor root) and the process name each passes to the guard. */
     private static final Map<String, String> ENTRY_POINTS = Map.of(
             "core-cluster/src/main/java/com/openexchange/core/Main.java", "core-cluster.jar",
@@ -48,7 +51,7 @@ public class RetiredSettingsProcessTest {
     public void aRetiredEnvironmentVariableRefusesTheMemberWithOneLine() throws Exception {
         final Run r = run(Map.of("ASSETS_ROLE", "member"), List.of());
         assertEquals("exit code; stderr=" + r.err, 1, r.exit);
-        assertEquals("stderr", ENV_LINE, r.err.strip());
+        assertTrue("stderr: " + r.err, r.err.strip().matches(TIME + Pattern.quote(ENV_LINE)));
         assertEquals("nothing started: stdout=" + r.out, "", r.out.strip());
     }
 
@@ -56,7 +59,7 @@ public class RetiredSettingsProcessTest {
     public void aRetiredSystemPropertyRefusesTheMemberWithOneLine() throws Exception {
         final Run r = run(Map.of(), List.of("-Dassets.node.port=9790"));
         assertEquals("exit code; stderr=" + r.err, 1, r.exit);
-        assertEquals("stderr", PROPERTY_LINE, r.err.strip());
+        assertTrue("stderr: " + r.err, r.err.strip().matches(TIME + Pattern.quote(PROPERTY_LINE)));
         assertEquals("nothing started: stdout=" + r.out, "", r.out.strip());
     }
 
@@ -65,6 +68,8 @@ public class RetiredSettingsProcessTest {
         final Path root = reactorRoot();
         final Pattern firstStatement = Pattern.compile(
                 "static void main\\((?:final )?String\\[] args\\) \\{\\s*(?://[^\\n]*\\n\\s*)*"
+                        // a long-running process stamps its log lines before it writes one; that reads no setting
+                        + "(?:com\\.openexchange\\.cluster\\.LogTimestamps\\.install\\(\\);\\s*(?://[^\\n]*\\n\\s*)*)?"
                         + "com\\.openexchange\\.core\\.config\\.RetiredSettings\\.refuseRetired\\(\"([^\"]+)\"");
         for (final Map.Entry<String, String> e : ENTRY_POINTS.entrySet()) {
             final String src = Files.readString(root.resolve(e.getKey()), StandardCharsets.UTF_8);

@@ -154,12 +154,19 @@ public final class CoreClusteredService implements ClusteredService {
 
     public CoreClusteredService(final SnapshotModeSettings settings) {
         this.snapshotModeSettings = java.util.Objects.requireNonNull(settings, "settings");
+        this.tailReadBudget = settings.newTailReadBudget();
         this.snapshotMode = settings.mode();
         this.shadowProducer = new MemberShadowProducer(new MemberShadowProducer.Host(snapshotMode,
                 settings.producerSettings(), readiness, () -> readyOutsideSnapshot, () -> consensusReadiness, () -> isLeader,
                 () -> leadershipTermId, () -> termBaseLogPosition, this::skipWindowActive, () -> shadowHousekeeping,
                 () -> shadowFaults, settings.witnessAlarmMs()));
     }
+
+    /**
+     * The one replay budget of this member's journal tail readers (the restore's money and order journal reads, the
+     * housekeeping's periodic read): {@code JOURNAL_TAIL_READ_BUDGET_BYTES} per {@code JOURNAL_TAIL_READ_WINDOW_MS}.
+     */
+    private final com.openexchange.core.infrastructure.journal.TailReadBudget tailReadBudget;
 
     /** The follower producer (node-local: decides only whether THIS node writes a copy of its own image). */
     private final MemberShadowProducer shadowProducer;
@@ -298,7 +305,7 @@ public final class CoreClusteredService implements ClusteredService {
             return OrderJournalRestoreRule.withoutJournal();
         }
         return new OrderJournalRestoreRule(org.agrona.concurrent.SystemNanoClock.INSTANCE,
-                snapshotModeSettings.loadTimeoutMs(), new OrderJournalRestoreRule.Holes() {
+                snapshotModeSettings.loadTimeoutMs(), tailReadBudget, new OrderJournalRestoreRule.Holes() {
                     @Override
                     public void declare(final long fromExclusive, final long toInclusive) {
                         j.declareHole(fromExclusive, toInclusive);
@@ -502,6 +509,9 @@ public final class CoreClusteredService implements ClusteredService {
     private volatile com.openexchange.cluster.journal.JournalRetentionAgent journalRetention;
     // Why the journal retention thread did not start; null when it started (or onStart has not run yet).
     private volatile String journalRetentionStartFailure;
+    // Aeron's duty-cycle and snapshot-duration counters as /metrics series (kit): its own daemon thread and its own
+    // read-only mapping of the media driver's counters file. Null when it did not start.
+    private volatile com.openexchange.cluster.StallMetrics stallMetrics;
     // Lazily connected archive client used only to confirm the snapshot recording landed on disk
     // before onTakeSnapshot returns (see awaitSnapshotRecorded). Cloned context: never shares lock
     // state with the cluster's own archive client. Closed in onTerminate.
@@ -577,6 +587,7 @@ public final class CoreClusteredService implements ClusteredService {
         startNodeEndpoint();
         startDurability(cluster);
         startJournalRetention(cluster);
+        startStallMetrics(cluster);
         // Started, not ready: the snapshot is loaded but the log replay may
         // still be running. Readiness waits for current consensus and application evidence.
         readiness.started();
@@ -763,7 +774,8 @@ public final class CoreClusteredService implements ClusteredService {
                 () -> snapshotMode == SnapshotMode.SHADOW ? 1 : 0);
         for (final SnapshotModeCounters.C c : SnapshotModeCounters.C.values()) {
             final boolean gauge = c == SnapshotModeCounters.C.RESTORE_PATH || c == SnapshotModeCounters.C.RESTORE_CANDIDATES_SCANNED
-                    || c == SnapshotModeCounters.C.TAIL_MS || c == SnapshotModeCounters.C.JOURNAL_TAIL_SEQ;
+                    || c == SnapshotModeCounters.C.TAIL_MS || c == SnapshotModeCounters.C.JOURNAL_TAIL_SEQ
+                    || c == SnapshotModeCounters.C.JOURNAL_TAIL_READ_MS;
             final java.util.function.LongSupplier v = () -> snapshotModeCounters.get(c);
             if (gauge) {
                 body.gauge(c.metricName(), "Snapshot mode and shadow restore: " + c.metricName(), v);
@@ -840,6 +852,16 @@ public final class CoreClusteredService implements ClusteredService {
             return journalRetentionStartFailure == null ? ""
                     : com.openexchange.cluster.journal.JournalRetentionAgent.renderNotStarted("core");
         });
+        // core_consensus_module_*, core_service_*, core_snapshot_total_*, core_snapshot_service_*, core_driver_* and
+        // core_archive_*: rendered by the kit from the values its own thread sampled (the scrape reads no counter)
+        body.text(() -> {
+            final com.openexchange.cluster.StallMetrics stall = stallMetrics;
+            return stall == null ? "" : stall.renderMetrics();
+        });
+        body.counter("core_journal_tail_budget_bytes_total", "Bytes the journal tail readers asked the archive to"
+                + " replay under JOURNAL_TAIL_READ_BUDGET_BYTES", tailReadBudget::grantedBytesTotal);
+        body.counter("core_journal_tail_budget_wait_ms_total", "Time the journal tail readers waited for room in"
+                + " JOURNAL_TAIL_READ_BUDGET_BYTES", tailReadBudget::waitedMsTotal);
         body.counter("pruner_wakes_by_shadow_total", "Purge passes run because a shadow requested one", () -> {
             final com.openexchange.cluster.SnapshotLogPruner p = logPruner;
             return p == null ? 0 : p.wakesByShadow();
@@ -1003,7 +1025,8 @@ public final class CoreClusteredService implements ClusteredService {
                             new com.openexchange.cluster.shadow.ShadowHousekeeping.Counters(),
                             () -> publishedGenesisId, cluster.context().errorHandler(), pullSettings(), pullHost(),
                             this::leaderNow, "shadow-puller-core-" + cluster.memberId())
-                            .leaderArchiveEndpoint(shadowProducer::leaderArchiveEndpoint);
+                            .leaderArchiveEndpoint(shadowProducer::leaderArchiveEndpoint)
+                            .tailReadBudget(tailReadBudget);
                     // the producer's slot is the cluster member id (cluster.memberId() is still -1 in onStart: the
                     // consensus context names it); the witness alarm is wired with it, whether or not this node produces
                     final io.aeron.cluster.ConsensusModule.Context cctx = consensusContext;
@@ -1872,6 +1895,25 @@ public final class CoreClusteredService implements ClusteredService {
         sweepArmed = false;
     }
 
+    /**
+     * Start the kit's sampler of Aeron's duty-cycle and snapshot-duration counters: a daemon thread of its own that
+     * reads the media driver's counters file once a second through its own read-only mapping (both driver modes).
+     * This call opens the mapping and starts the thread; nothing of it runs on the service thread afterwards. Loud
+     * and not fatal when it cannot start: the series are then absent from /metrics.
+     */
+    private void startStallMetrics(final Cluster cluster) {
+        try {
+            final com.openexchange.cluster.StallMetrics stall = com.openexchange.cluster.StallMetrics.open("core",
+                    cluster.aeron().context().aeronDirectoryName(), cluster.context().clusterId(),
+                    cluster.context().serviceId());
+            stall.start();
+            stallMetrics = stall;
+        } catch (final Throwable t) {
+            System.err.println("CORE CRITICAL: the duty-cycle metrics did not start: /metrics has no"
+                    + " core_*_max_cycle_time and core_snapshot_*_duration series on this member: " + t);
+        }
+    }
+
     @Override
     public void onTerminate(Cluster cluster) {
         applicationCallbackDepth++;
@@ -1894,6 +1936,11 @@ public final class CoreClusteredService implements ClusteredService {
         final com.openexchange.cluster.journal.JournalRetentionAgent retention = journalRetention;
         if (retention != null) {
             retention.stop();
+        }
+        final com.openexchange.cluster.StallMetrics stall = stallMetrics;
+        if (stall != null) {
+            stallMetrics = null;
+            stall.close(); // stops its thread and releases its mapping of the counters file
         }
         final MemberShadowHousekeeping hk = shadowHousekeeping;
         if (hk != null) {
@@ -2061,7 +2108,7 @@ public final class CoreClusteredService implements ClusteredService {
                     System.err.println(text);
                     failFast.run();
                 },
-                startupPull()).orderJournal(orderJournalRule());
+                startupPull()).orderJournal(orderJournalRule()).tailReadBudget(tailReadBudget);
         final ShadowRestore.Outcome outcome;
         try {
             outcome = restore.run(stub);

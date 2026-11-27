@@ -52,7 +52,20 @@ public final class SnapshotModeSettings {
         SHADOW_WITNESS_ALARM_MS("shadow.witness.alarm.ms", "7200000"),
         SHADOW_LEADER_REMOTE_FLOOR("shadow.leader.remote.floor", "true"),
         SHADOW_LEADER_REMOTE_HOLDERS("shadow.leader.remote.holders", "1"),
-        SHADOW_LEADER_REMOTE_MAX_AGE_MS("shadow.leader.remote.max.age.ms", "30000");
+        SHADOW_LEADER_REMOTE_MAX_AGE_MS("shadow.leader.remote.max.age.ms", "30000"),
+        /**
+         * The bytes the journal tail readers of this member may ask its archive to replay per
+         * {@link #JOURNAL_TAIL_READ_WINDOW_MS} window (the restore's reads and the housekeeping's, shared): 8 journal
+         * terms of the default 4m, 32 MiB. See {@link com.openexchange.core.infrastructure.journal.TailReadBudget}.
+         */
+        JOURNAL_TAIL_READ_BUDGET_BYTES("journal.tail.read.budget.bytes", "33554432"),
+        /** The window of {@link #JOURNAL_TAIL_READ_BUDGET_BYTES}; keep it above the media driver's publication linger. */
+        JOURNAL_TAIL_READ_WINDOW_MS("journal.tail.read.window.ms", "10000"),
+        /**
+         * The time one restore may spend reading the money journal's tail over every attempt: a read that reaches
+         * {@link #SHADOW_LOAD_TIMEOUT_MS} with progress is read again, resuming where it stopped, while this lasts.
+         */
+        JOURNAL_TAIL_RESTORE_BUDGET_MS("journal.tail.restore.budget.ms", "300000");
 
         private final String property;
         private final String defaultText;
@@ -103,6 +116,9 @@ public final class SnapshotModeSettings {
     private final boolean leaderRemoteFloor;
     private final int leaderRemoteHolders;
     private final long leaderRemoteMaxAgeMs;
+    private final long journalTailReadBudgetBytes;
+    private final long journalTailReadWindowMs;
+    private final long journalTailRestoreBudgetMs;
 
     private SnapshotModeSettings(final Source source) {
         this.mode = SnapshotMode.parse(raw(source, Key.SNAPSHOT_MODE));
@@ -126,6 +142,9 @@ public final class SnapshotModeSettings {
         this.leaderRemoteFloor = bool(source, Key.SHADOW_LEADER_REMOTE_FLOOR);
         this.leaderRemoteHolders = (int)range(source, Key.SHADOW_LEADER_REMOTE_HOLDERS, 1, 64);
         this.leaderRemoteMaxAgeMs = range(source, Key.SHADOW_LEADER_REMOTE_MAX_AGE_MS, 1000, 3_600_000L);
+        this.journalTailReadBudgetBytes = range(source, Key.JOURNAL_TAIL_READ_BUDGET_BYTES, 65_536L, 1L << 40);
+        this.journalTailReadWindowMs = range(source, Key.JOURNAL_TAIL_READ_WINDOW_MS, 100, 3_600_000L);
+        this.journalTailRestoreBudgetMs = range(source, Key.JOURNAL_TAIL_RESTORE_BUDGET_MS, 1000, 86_400_000L);
     }
 
     /** The settings of this process. @throws IllegalArgumentException with the 3.5 text of the first bad setting */
@@ -283,21 +302,81 @@ public final class SnapshotModeSettings {
     }
 
     /**
-     * The CRITICAL lines a member prints at boot: the anchor rule's opt-out, the disabled puller, a kinds widening,
-     * {@code SHADOW_PRODUCER=none} in shadow mode, an explicit {@code SHADOW_PRODUCER=designated-follower} in off mode.
+     * {@code JOURNAL_TAIL_READ_BUDGET_BYTES} (default 33554432, 65536..2^40): the replay bytes the journal tail readers
+     * of this member may use per window. With the default 4m journal terms and a window above the driver's linger,
+     * the tail reads hold at most {@code 2 * max(budget, term)} = 64 MiB of the driver directory at once.
+     */
+    public long journalTailReadBudgetBytes() {
+        return journalTailReadBudgetBytes;
+    }
+
+    /** {@code JOURNAL_TAIL_READ_WINDOW_MS} (default 10000, 100..3600000): the window of the budget above. */
+    public long journalTailReadWindowMs() {
+        return journalTailReadWindowMs;
+    }
+
+    /**
+     * {@code JOURNAL_TAIL_RESTORE_BUDGET_MS} (default 300000, 1000..86400000): the time one restore may spend
+     * reading the money journal's tail over every attempt, each bounded by {@code SHADOW_LOAD_TIMEOUT_MS}.
+     */
+    public long journalTailRestoreBudgetMs() {
+        return journalTailRestoreBudgetMs;
+    }
+
+    /** The process's one tail read budget, from the two settings above. */
+    public com.openexchange.core.infrastructure.journal.TailReadBudget newTailReadBudget() {
+        return new com.openexchange.core.infrastructure.journal.TailReadBudget(journalTailReadBudgetBytes,
+                journalTailReadWindowMs, org.agrona.concurrent.SystemNanoClock.INSTANCE);
+    }
+
+    /**
+     * The CRITICAL lines a member prints at boot: the anchor rule's opt-out, the disabled puller in shadow mode, a
+     * kinds widening, {@code SHADOW_PRODUCER=none} in shadow mode, an explicit
+     * {@code SHADOW_PRODUCER=designated-follower} in off mode.
+     *
+     * <p>An empty {@code SHADOW_PULL_SOURCES} is CRITICAL in shadow mode: the member's snapshots are stubs, and the
+     * copies it restores from and purges its log behind (the replica's, another member's) reach its archive only
+     * through the puller. In off mode the empty list is the default and the line is a warning
+     * ({@link #warningLines}): an off-mode member takes full snapshots, but its newest snapshot can still be a stub
+     * (taken before a switch from shadow mode, or a snapshot taken in a skip window), and such a stub restores only
+     * from a shadow; without sources a restore that finds none in the member's own archive halts. The boot guard
+     * runs before the archive is open, so it cannot rule that out and warns every time.</p>
      */
     public java.util.List<String> criticalLines() {
         final java.util.List<String> out = new java.util.ArrayList<>();
         if (anchorRule.criticalLine() != null) {
             out.add(anchorRule.criticalLine());
         }
-        out.addAll(pullSettings.criticalLines());
+        for (final String line : pullSettings.criticalLines()) {
+            if (!pullerOffByDesign() || !ShadowPullSettings.DISABLED_LINE.equals(line)) {
+                out.add(line);
+            }
+        }
         if (mode == SnapshotMode.SHADOW) {
             out.addAll(producerSettings.criticalLines());
         } else if (producerExplicit && producerSettings.enabled()) {
             out.add(PRODUCER_IGNORED_LINE);
         }
         return out;
+    }
+
+    /**
+     * The WARNING lines a member prints at boot: the disabled puller of a member in off mode
+     * ({@link #OFF_MODE_PULLER_DISABLED_LINE}).
+     */
+    public java.util.List<String> warningLines() {
+        return pullerOffByDesign() ? java.util.List.of(OFF_MODE_PULLER_DISABLED_LINE) : java.util.List.of();
+    }
+
+    /** The off-mode line of an empty {@code SHADOW_PULL_SOURCES}. */
+    public static final String OFF_MODE_PULLER_DISABLED_LINE = ShadowPullSettings.DISABLED_LINE
+            + " (SNAPSHOT_MODE=off: full snapshots restore without a shadow, but a newest snapshot that is a stub, taken"
+            + " before a switch from shadow mode or in a skip window, restores only from a shadow, and with no shadow in"
+            + " this member's own archive that restore halts: there is no source to pull one from)";
+
+    /** Off mode without pull sources: the default; the line is a warning, not CRITICAL. */
+    private boolean pullerOffByDesign() {
+        return mode == SnapshotMode.OFF && !pullSettings.enabled();
     }
 
     /** The off-mode line of an explicit {@code SHADOW_PRODUCER=designated-follower}. */
@@ -313,6 +392,8 @@ public final class SnapshotModeSettings {
                 + " windowBudgetPct=" + producerSettings.windowBudgetPct() + " serializeEstimateMs="
                 + producerSettings.serializeEstimateMs() + " witnessAlarmMs=" + witnessAlarmMs
                 + " leaderRemoteFloor=" + leaderRemoteFloor + " leaderRemoteHolders=" + leaderRemoteHolders
-                + " leaderRemoteMaxAgeMs=" + leaderRemoteMaxAgeMs;
+                + " leaderRemoteMaxAgeMs=" + leaderRemoteMaxAgeMs + " journalTailReadBudgetBytes="
+                + journalTailReadBudgetBytes + " journalTailReadWindowMs=" + journalTailReadWindowMs
+                + " journalTailRestoreBudgetMs=" + journalTailRestoreBudgetMs;
     }
 }

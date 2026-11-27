@@ -50,7 +50,9 @@ public final class CoreShadowReplicaMain {
 
     /** Runs the replica until it stops, then exits through the kit's {@link EngineLifecycle}. Never returns normally. */
     public static void run() {
-        final EngineLifecycle lifecycle = EngineLifecycle.install("Core replica", msg -> log.error("%s", msg));
+        // A fault goes to the log at ERROR; that a watchdog was armed, and with which bounds, is information.
+        final EngineLifecycle lifecycle = EngineLifecycle.install("Core replica", msg -> log.error("%s", msg),
+                msg -> log.info("%s", msg));
         try {
             run(lifecycle);
         } catch (final Throwable t) {
@@ -64,6 +66,9 @@ public final class CoreShadowReplicaMain {
         // Settings first: a bad value is refused with the boot guard prefix and exit 1 before anything launches.
         final ReplicaSettings settings = ReplicaSettings.enforce();
         for (final String line : settings.storageWarnings()) {
+            log.warn("%s", line);
+        }
+        for (final String line : settings.pullDisabledWarnings()) {
             log.warn("%s", line);
         }
         for (final String line : settings.pullWarnings()) {

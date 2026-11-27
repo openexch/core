@@ -30,7 +30,9 @@ public final class ProjectorMain {
     private static final long AGENT_JOIN_MS = 3_000;
 
     public static void main(final String[] args) {
-        // First, before the lifecycle: a deployment written for the retired names refuses before any setting is read.
+        // First: every line this process writes starts with its time (ISO-8601, UTC, milliseconds).
+        com.openexchange.cluster.LogTimestamps.install();
+        // Then, before the lifecycle: a deployment written for the retired names refuses before any setting is read.
         com.openexchange.core.config.RetiredSettings.refuseRetired("core-projector.jar");
         final EngineLifecycle lifecycle;
         try {
