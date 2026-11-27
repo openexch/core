@@ -255,6 +255,87 @@ public class JournalRetentionExternalDriverProcessTest {
         return Long.MIN_VALUE;
     }
 
+    /** A whole-line series value of the member's {@code /metrics} body, or null. */
+    private static String series(final String body, final String name) {
+        for (final String line : body.split("\n")) {
+            if (line.startsWith(name + " ")) {
+                return line.substring(name.length() + 1).trim();
+            }
+        }
+        return null;
+    }
+
+    private static void assertHealthyLogAndStallMetrics(final Node node) throws Exception {
+        final String log = node.log();
+        assertFalse(log, log.contains("does not point to a valid frame"));
+        assertFalse("an Aeron error on a healthy member:\n" + log, log.contains("Aeron error #"));
+        final String time = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z ";
+        int retentionLines = 0;
+        int armedLines = 0;
+        int stamped = 0;
+        for (final String line : log.split("\n")) {
+            if (line.contains("[JOURNAL-RETENTION]")) {
+                retentionLines++;
+                assertTrue(line, line.matches(time + "\\[JOURNAL-RETENTION\\] .*"));
+            }
+            if (line.contains("watchdog armed")) {
+                armedLines++;
+                assertTrue(line, line.matches(time + "\\[INFO \\] AeronCluster - Core node .* watchdog armed: .*"));
+            }
+            if (line.contains("shadow puller disabled")) {
+                // SNAPSHOT_MODE=off without pull sources: the default, a warning (a stub left as the newest snapshot
+                // would need a shadow)
+                assertTrue(line, line.matches(time + "\\[BOOT-GUARD\\] WARNING: shadow puller disabled: .*"));
+            }
+            assertFalse("a line with two times: " + line, line.matches(time + time + ".*"));
+            // only the JVM's own lines, written before main, and continuation lines carry no time
+            final boolean hasTime = line.matches(time + ".*");
+            stamped += hasTime ? 1 : 0;
+            assertTrue("a line without its time: " + line, hasTime || line.isEmpty() || line.startsWith("Picked up ")
+                    || line.startsWith("WARNING: ") || line.startsWith("\t") || line.startsWith(" ")
+                    || line.startsWith("Caused by: ") || line.startsWith("Suppressed: "));
+        }
+        assertTrue("lines were written: " + stamped, stamped > 20);
+        assertTrue("retention lines were written: " + retentionLines, retentionLines >= 1);
+        assertEquals("the quorum, rejoin and catch-up watchdogs:\n" + log, 3, armedLines);
+        assertFalse("an error line on a healthy member:\n" + log, log.contains("[ERROR]"));
+        assertFalse("a CRITICAL line on a healthy member:\n" + log, log.contains("CRITICAL"));
+
+        final String body = get(node, "/metrics");
+        assertTrue("the member serves /metrics with its retention series:\n" + body, body != null
+                && series(body, "core_journal_retention_state{journal=\"order\"}") != null);
+        for (final String name : new String[] {"core_consensus_module_max_cycle_time_seconds",
+            "core_consensus_module_max_cycle_time_recent_seconds",
+            "core_consensus_module_max_cycle_time_last_rise_age_seconds",
+            "core_consensus_module_cycle_time_exceeded_total", "core_consensus_module_cycle_time_exceeded_recent",
+            "core_service_max_cycle_time_seconds", "core_service_cycle_time_exceeded_total",
+            "core_snapshot_total_max_duration_seconds", "core_snapshot_total_duration_exceeded_total",
+            "core_snapshot_service_max_duration_seconds", "core_snapshot_service_duration_exceeded_total",
+            "core_driver_conductor_max_cycle_time_seconds", "core_driver_sender_max_cycle_time_seconds",
+            "core_driver_receiver_max_cycle_time_seconds", "core_stall_sampler_age_seconds"}) {
+            assertTrue("no " + name + " series:\n" + body, series(body, name) != null);
+        }
+        assertTrue("the archive conductor's cycle:\n" + body, body.lines().anyMatch(
+                l -> l.startsWith("core_archive_max_cycle_time_seconds{archive_id=")
+                        && l.contains(",agent=\"conductor\"} ")));
+        final long samplerAge = Long.parseLong(series(body, "core_stall_sampler_age_seconds"));
+        assertTrue("the sampler runs: " + samplerAge, samplerAge >= 0 && samplerAge <= 5);
+        assertTrue("the consensus module's slowest cycle is a positive time: " + body,
+                Double.parseDouble(series(body, "core_consensus_module_max_cycle_time_seconds")) > 0);
+        // one scrape for the three, so they belong to one moment
+        final String scrape = get(node, "/metrics");
+        assertTrue("the member serves /metrics", scrape != null);
+        final long passMs = Long.parseLong(series(scrape, "core_journal_retention_last_pass_duration_ms{journal=\"order\"}"));
+        assertTrue("a pass was timed, within the poll interval: " + passMs, passMs >= 0 && passMs < 60_000);
+        // the journal holds records, so the passes asked the archive to replay bytes to read its tail; the last
+        // pass's share is part of the total
+        final long readTotal = Long.parseLong(series(scrape, "core_journal_retention_tail_read_bytes_total{journal=\"order\"}"));
+        final long readLast = Long.parseLong(series(scrape, "core_journal_retention_tail_read_bytes{journal=\"order\"}"));
+        assertTrue("the passes replayed bytes to read the tail: " + readTotal, readTotal > 0);
+        assertTrue("the last pass's tail read is part of the total: " + readLast + " of " + readTotal,
+                readLast >= 0 && readLast <= readTotal);
+    }
+
     private static void await(final BooleanSupplier done, final long timeoutMs,
                               final java.util.function.Supplier<String> why) throws InterruptedException {
         final long deadline = System.currentTimeMillis() + timeoutMs;
@@ -320,6 +401,12 @@ public class JournalRetentionExternalDriverProcessTest {
                         + metric(node, "state"));
         assertEquals(head, metric(node, "safe_seq"));
         assertEquals(2, metric(node, "mode"));
+
+        // the real process on an external driver, after a purge and several more retention passes (one a second):
+        // no refused replay, every line of the member carries its time, that a watchdog was armed is INFO, and
+        // Aeron's duty-cycle counters are series of /metrics
+        Thread.sleep(6_000);
+        assertHealthyLogAndStallMetrics(node);
 
         // 2. two restarts: no hole, the old recordings go, the start advances again
         int next = 1_601;

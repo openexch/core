@@ -5,9 +5,7 @@ import com.openexchange.core.infrastructure.InfrastructureConstants;
 import com.openexchange.cluster.shadow.ShadowReplay;
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.ArchiveException;
-import io.aeron.logbuffer.FrameDescriptor;
-import org.agrona.BitUtil;
+import com.openexchange.cluster.journal.RecordingTail;
 import org.agrona.concurrent.NanoClock;
 
 import java.util.ArrayList;
@@ -24,19 +22,28 @@ import java.util.Objects;
  * recording still ACTIVE (no stop position yet: a writer not yet stopped, or this process's own writer) is read to
  * its current recorded position and counted. Never writes, never purges.
  *
- * <p>Finding the last message without reading the whole recording: a journal message is one small SBE message
- * (header + one block, at most 128 bytes, {@code MoneyJournal}'s scratch buffer) under the MTU, so it is ONE
- * unfragmented frame of at most {@value #MAX_FRAME_LENGTH} aligned bytes, and {@code journalSeq} sits at
- * {@link #JOURNAL_SEQ_OFFSET} of every message ({@code MoneyJournalWriterAgent}). The reader asks the archive for a
- * replay of the last {@code w} bytes for {@code w = 32, 64, ..., MAX_FRAME_LENGTH}: the archive refuses a start that is
- * not a frame header ({@code INVALID_POSITION}), and an accepted window must deliver exactly one whole message whose
- * aligned frame length is {@code w}. If no window fits (the recording ends in padding, a crash between the pad and the
- * next message), the reader replays the term that holds the end, which starts on a frame boundary by construction, and
- * keeps its last message. A term with no message is {@code Unknown}: SKIP is then not taken (the safe direction).</p>
+ * <p>The last message of a recording is read by the kit's {@link RecordingTail}: a replay that starts at the
+ * recording's start or at the base of the term that holds its end (both the start of a frame), or just after the last
+ * message this reader's {@code RecordingTail} already delivered from that recording. The archive is never asked for a
+ * start inside a frame, which it would refuse and raise into the node's error log. A journal message is one small SBE
+ * message (header + one block, at most 128 bytes, {@code MoneyJournal}'s scratch buffer) in one frame of at most
+ * {@value #MAX_FRAME_LENGTH} aligned bytes, with {@code journalSeq} at {@link #JOURNAL_SEQ_OFFSET}
+ * ({@code MoneyJournalWriterAgent}); a message too short to carry one does not count, and the tail is then the last
+ * one before it in that term. A last term with no message is {@code Unknown}: SKIP is then not taken (the safe
+ * direction).</p>
+ *
+ * <p>Cost: a reader with a new {@code RecordingTail} (the default constructor: a restore, read once) replays up to
+ * one term of every recording. A caller that reads periodically keeps one {@link #newTail()} and passes it to every
+ * reader it builds: a later read then replays only what was recorded since, and nothing for a recording whose end
+ * did not move. What the {@code RecordingTail} remembers changes how many bytes are replayed, never the answer. Each
+ * replay first takes its bytes from the process's {@link TailReadBudget} and waits for room when the window is used
+ * up, so many first looks cannot fill the media driver's directory at once; a read whose deadline passes while it
+ * waits answers {@link Unknown}, and what it already read stays in the {@code RecordingTail} for the next read.</p>
  *
  * <p>Answers: {@link Known} (seq, recordings read, active ones), {@link NoJournal} (no recording, or none with bytes:
  * skip-safe only when the shadow says journaling is off), {@link Unknown} (an archive or replay failure, or a deadline:
- * SKIP is not taken, counted by the caller). One owner thread per call; the replays are serial.</p>
+ * SKIP is not taken, counted by the caller). One owner thread per call, and one owner thread for a shared
+ * {@code RecordingTail}; the replays are serial.</p>
  */
 public final class MoneyJournalTail {
 
@@ -44,9 +51,8 @@ public final class MoneyJournalTail {
     public static final int JOURNAL_SEQ_OFFSET = 8;
     /**
      * One journal message: header + JournalSettle (101 in version 2) = 109 bytes, plus the 32-byte data header,
-     * aligned. A format constant coupled to the largest journal message: if a future message is larger, no window up to
-     * this length fits and the read falls through to the whole-last-term replay below (still correct, slower), so raise
-     * it with the codec.
+     * aligned. A format constant coupled to the largest journal message (the retention profile reads it); the tail
+     * read does not depend on it. Raise it with the codec.
      */
     public static final int MAX_FRAME_LENGTH = 160;
 
@@ -62,8 +68,14 @@ public final class MoneyJournalTail {
     public record NoJournal(int recordings) implements Result {
     }
 
-    /** Not readable now; the caller treats every SKIP as not skip-safe. */
-    public record Unknown(String reason) implements Result {
+    /**
+     * Not readable now; the caller treats every SKIP as not skip-safe. {@code deadline}: the read ran out of time (its
+     * own deadline, or waiting for the tail read budget), so a later read may get further.
+     */
+    public record Unknown(String reason, boolean deadline) implements Result {
+        public Unknown(final String reason) {
+            this(reason, false);
+        }
     }
 
     private record Rec(long id, long start, long stop, int termLength) {
@@ -74,13 +86,46 @@ public final class MoneyJournalTail {
     private final NanoClock clock;
     private final String channelFragment;
     private final int streamId;
+    private final RecordingTail<Long> tail;
+    private final TailReadBudget budget;
+    /** Recordings the last {@link #read} answered (their last message read), whether the read ended Known or not. */
+    private int answered;
 
+    /**
+     * A reader that remembers nothing (every read looks at each recording for the first time) and is not held to a
+     * replay budget: for tests and tools. A member's readers pass the process's {@link TailReadBudget}.
+     */
     public MoneyJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock) {
-        this(aeron, archive, clock, "aeron:ipc", InfrastructureConstants.MONEY_JOURNAL_STREAM_ID);
+        this(aeron, archive, clock, newTail(), TailReadBudget.unbounded());
+    }
+
+    /**
+     * @param tail   what earlier reads of this archive's journal recordings delivered ({@link #newTail()}), kept by a
+     *               caller that reads more than once; owned by one thread
+     * @param budget the bytes this process's tail readers may replay per window; a read waits for room before each
+     *               replay, within its own deadline
+     */
+    public MoneyJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock,
+                            final RecordingTail<Long> tail, final TailReadBudget budget) {
+        this(aeron, archive, clock, "aeron:ipc", InfrastructureConstants.MONEY_JOURNAL_STREAM_ID, tail, budget);
+    }
+
+    /** The {@code journalSeq} of every message long enough to carry one; a shorter message does not count. */
+    public static RecordingTail<Long> newTail() {
+        return new RecordingTail<>((buffer, offset, length, header) ->
+                length >= JOURNAL_SEQ_OFFSET + Long.BYTES ? buffer.getLong(offset + JOURNAL_SEQ_OFFSET) : null);
     }
 
     MoneyJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock,
-                     final String channelFragment, final int streamId) {
+                     final String channelFragment, final int streamId, final RecordingTail<Long> tail) {
+        this(aeron, archive, clock, channelFragment, streamId, tail, TailReadBudget.unbounded());
+    }
+
+    MoneyJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock,
+                     final String channelFragment, final int streamId, final RecordingTail<Long> tail,
+                     final TailReadBudget budget) {
+        this.tail = Objects.requireNonNull(tail, "tail");
+        this.budget = Objects.requireNonNull(budget, "budget");
         this.aeron = Objects.requireNonNull(aeron, "aeron");
         this.archive = Objects.requireNonNull(archive, "archive");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -91,6 +136,7 @@ public final class MoneyJournalTail {
     /** @param timeoutNs the whole read's budget ({@code SHADOW_LOAD_TIMEOUT_MS}) */
     public Result read(final long timeoutNs) {
         final long deadlineNs = clock.nanoTime() + timeoutNs;
+        answered = 0;
         final List<Rec> recs = new ArrayList<>();
         try {
             long from = 0;
@@ -109,6 +155,15 @@ public final class MoneyJournalTail {
         } catch (final RuntimeException listFailed) {
             return new Unknown("listing journal recordings failed: " + listFailed);
         }
+        // recordings the archive no longer lists (purged whole) are forgotten; recording ids are never reused
+        tail.retain(id -> {
+            for (final Rec r : recs) {
+                if (r.id() == id) {
+                    return true;
+                }
+            }
+            return false;
+        });
         long max = -1;
         int read = 0;
         int active = 0;
@@ -140,8 +195,9 @@ public final class MoneyJournalTail {
                 seq = lastSeq(r, stop, deadlineNs);
             } catch (final RuntimeException readFailed) {
                 return new Unknown("last message of journal recording " + r.id() + " [" + r.start() + "," + stop
-                        + "): " + readFailed);
+                        + "): " + readFailed, TailReadBudget.isDeadline(readFailed));
             }
+            answered++;
             if (seq == Long.MIN_VALUE) {
                 return new Unknown("no journal message in the last term of recording " + r.id() + " [" + r.start()
                         + "," + stop + ")");
@@ -155,44 +211,34 @@ public final class MoneyJournalTail {
         return new Known(max, read, active);
     }
 
-    /** The journalSeq of the last message of {@code [r.start, stop)}, or {@code Long.MIN_VALUE} when there is none. */
+    /**
+     * The journalSeq of the last message of {@code [max(r.start, base of the term holding stop - 1), stop)}, or
+     * {@code Long.MIN_VALUE} when that range holds none.
+     */
     private long lastSeq(final Rec r, final long stop, final long deadlineNs) {
-        final ShadowReplay replay = new ShadowReplay(aeron, archive, clock);
-        for (int w = FrameDescriptor.FRAME_ALIGNMENT; w <= MAX_FRAME_LENGTH; w += FrameDescriptor.FRAME_ALIGNMENT) {
-            final long from = stop - w;
-            if (from < r.start()) {
-                break;
-            }
-            final long[] seq = {Long.MIN_VALUE};
-            final int[] messages = {0};
-            final int[] frameLength = {0};
-            try {
-                replay.readRange(r.id(), from, w, (buffer, offset, length, header) -> {
-                    messages[0]++;
-                    frameLength[0] = header.frameLength();
-                    if (length >= JOURNAL_SEQ_OFFSET + Long.BYTES) {
-                        seq[0] = buffer.getLong(offset + JOURNAL_SEQ_OFFSET);
-                    }
-                }, deadlineNs);
-            } catch (final ArchiveException notAFrame) {
-                if (notAFrame.errorCode() == ArchiveException.INVALID_POSITION) {
-                    continue; // not a frame header: a longer window
-                }
-                throw notAFrame;
-            }
-            if (messages[0] == 1 && BitUtil.align(frameLength[0], FrameDescriptor.FRAME_ALIGNMENT) == w
-                    && seq[0] != Long.MIN_VALUE) {
-                return seq[0];
-            }
+        final long want = TailReadBudget.estimate(r.start(), stop, r.termLength(), tail.resumePosition(r.id()));
+        budget.acquireOrThrow(want, deadlineNs);
+        if (want > 0 && clock.nanoTime() - deadlineNs >= 0) {
+            // the room came at the deadline: no replay is started past it (an end that did not move replays nothing)
+            budget.settle(want, 0);
+            throw new TailReadBudget.DeadlineException("deadline reached as the tail read budget made room ("
+                    + budget + ")");
         }
-        // the end is not one message frame (padding at a term end): read the term holding the end, frame aligned
-        final long termStart = Math.max(r.start(), (stop - 1) & ~((long)r.termLength() - 1));
-        final long[] seq = {Long.MIN_VALUE};
-        replay.readRange(r.id(), termStart, stop - termStart, (buffer, offset, length, header) -> {
-            if (length >= JOURNAL_SEQ_OFFSET + Long.BYTES) {
-                seq[0] = buffer.getLong(offset + JOURNAL_SEQ_OFFSET);
-            }
-        }, deadlineNs);
-        return seq[0];
+        final long before = tail.replayBytes();
+        try {
+            final Long seq = tail.last(new ShadowReplay(aeron, archive, clock), r.id(), r.start(), stop,
+                    r.termLength(), deadlineNs);
+            return seq == null ? Long.MIN_VALUE : seq;
+        } finally {
+            budget.settle(want, tail.replayBytes() - before);
+        }
+    }
+
+    /**
+     * The recordings the last {@link #read} got an answer for before it ended: a read that ran out of time answered
+     * the ones before the one it stopped in.
+     */
+    public int answered() {
+        return answered;
     }
 }

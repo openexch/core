@@ -32,6 +32,9 @@ public class SnapshotModeSettingsTest {
             new Range(SnapshotModeSettings.Key.SHADOW_WITNESS_ALARM_MS, 1000, 604_800_000L),
             new Range(SnapshotModeSettings.Key.SHADOW_LEADER_REMOTE_HOLDERS, 1, 64),
             new Range(SnapshotModeSettings.Key.SHADOW_LEADER_REMOTE_MAX_AGE_MS, 1000, 3_600_000L),
+            new Range(SnapshotModeSettings.Key.JOURNAL_TAIL_READ_BUDGET_BYTES, 65_536L, 1L << 40),
+            new Range(SnapshotModeSettings.Key.JOURNAL_TAIL_READ_WINDOW_MS, 100, 3_600_000L),
+            new Range(SnapshotModeSettings.Key.JOURNAL_TAIL_RESTORE_BUDGET_MS, 1000, 86_400_000L),
     };
 
     private static SnapshotModeSettings parse(final String mode, final SnapshotModeSettings.Key key, final String value) {
@@ -53,6 +56,9 @@ public class SnapshotModeSettingsTest {
             case SHADOW_WITNESS_ALARM_MS -> s.witnessAlarmMs();
             case SHADOW_LEADER_REMOTE_HOLDERS -> s.leaderRemoteHolders();
             case SHADOW_LEADER_REMOTE_MAX_AGE_MS -> s.leaderRemoteMaxAgeMs();
+            case JOURNAL_TAIL_READ_BUDGET_BYTES -> s.journalTailReadBudgetBytes();
+            case JOURNAL_TAIL_READ_WINDOW_MS -> s.journalTailReadWindowMs();
+            case JOURNAL_TAIL_RESTORE_BUDGET_MS -> s.journalTailRestoreBudgetMs();
             default -> throw new IllegalArgumentException(key.name());
         };
     }
@@ -89,6 +95,12 @@ public class SnapshotModeSettingsTest {
         assertEquals(1_048_576, d.consensusSnapshotMaxBytes());
         assertEquals(60_000, d.loadTimeoutMs());
         assertTrue(d.floorEnabled());
+        // the tail read budget: 8 journal terms of 4m per 10 s window; one restore reads the tail for at most 5 min
+        assertEquals(8L * 4 * 1024 * 1024, d.journalTailReadBudgetBytes());
+        assertEquals(10_000, d.journalTailReadWindowMs());
+        assertEquals(300_000, d.journalTailRestoreBudgetMs());
+        assertEquals(8L * 4 * 1024 * 1024, d.newTailReadBudget().budgetBytes());
+        assertEquals(10_000, d.newTailReadBudget().windowMs());
 
         assertEquals(SnapshotMode.SHADOW, SnapshotModeSettings.with(Map.of(SnapshotModeSettings.Key.SNAPSHOT_MODE, "shadow")).mode());
         assertEquals("SNAPSHOT_MODE 'bogus' (expected off|shadow)", assertThrows(IllegalArgumentException.class,
@@ -206,8 +218,25 @@ public class SnapshotModeSettingsTest {
         assertEquals(java.util.Set.of(com.openexchange.cluster.shadow.ShadowKind.ALIGNED), p.kinds());
         assertEquals(null, p.replicationEndpoint());
         assertEquals(null, p.responseEndpoint());
-        assertEquals("an empty source list is a CRITICAL line, never a refusal",
-                java.util.List.of(com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE), d.criticalLines());
+        // an empty source list is never a refusal: a warning in off mode (the default; a stub left as the newest
+        // snapshot still needs a shadow), a CRITICAL line in shadow mode (stubs depend on pulled copies)
+        assertEquals(java.util.List.of(), d.criticalLines());
+        assertEquals(java.util.List.of(SnapshotModeSettings.OFF_MODE_PULLER_DISABLED_LINE), d.warningLines());
+        assertTrue(SnapshotModeSettings.OFF_MODE_PULLER_DISABLED_LINE.startsWith(
+                com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE + " (SNAPSHOT_MODE=off: "));
+        assertTrue(SnapshotModeSettings.OFF_MODE_PULLER_DISABLED_LINE.contains("stub"));
+        final SnapshotModeSettings shadowNoSources = SnapshotModeSettings.with(
+                Map.of(SnapshotModeSettings.Key.SNAPSHOT_MODE, "shadow"));
+        assertEquals(java.util.List.of(com.openexchange.cluster.shadow.ShadowPullSettings.DISABLED_LINE),
+                shadowNoSources.criticalLines());
+        assertEquals(java.util.List.of(), shadowNoSources.warningLines());
+        // a kinds widening stays CRITICAL in off mode, next to the warning
+        final SnapshotModeSettings offWide = parse("off", SnapshotModeSettings.Key.SHADOW_PULL_KINDS,
+                "ALIGNED,STANDBY");
+        assertEquals(1, offWide.criticalLines().size());
+        assertTrue(offWide.criticalLines().toString(), offWide.criticalLines().get(0).startsWith(
+                "pulling single-producer kinds ALIGNED,STANDBY"));
+        assertEquals(java.util.List.of(SnapshotModeSettings.OFF_MODE_PULLER_DISABLED_LINE), offWide.warningLines());
 
         // sources: an ordered allowlist of host:port, never derived
         final SnapshotModeSettings two = parse("shadow", SnapshotModeSettings.Key.SHADOW_PULL_SOURCES,
@@ -215,6 +244,7 @@ public class SnapshotModeSettingsTest {
         assertEquals("[10.0.0.2:9301, 10.0.0.3:9301]", two.pullSettings().sources().toString());
         assertTrue(two.pullSettings().enabled());
         assertEquals(java.util.List.of(), two.criticalLines());
+        assertEquals(java.util.List.of(), two.warningLines());
         assertEquals("SHADOW_PULL_SOURCES entry '10.0.0.2' is not host:port", assertThrows(
                 IllegalArgumentException.class, () -> parse("off", SnapshotModeSettings.Key.SHADOW_PULL_SOURCES,
                         "10.0.0.2")).getMessage());

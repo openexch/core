@@ -5,9 +5,7 @@ import com.openexchange.core.infrastructure.InfrastructureConstants;
 import com.openexchange.cluster.shadow.ShadowReplay;
 import io.aeron.Aeron;
 import io.aeron.archive.client.AeronArchive;
-import io.aeron.archive.client.ArchiveException;
-import io.aeron.logbuffer.FrameDescriptor;
-import org.agrona.BitUtil;
+import com.openexchange.cluster.journal.RecordingTail;
 import org.agrona.concurrent.NanoClock;
 
 import java.util.ArrayList;
@@ -17,11 +15,13 @@ import java.util.Objects;
 /**
  * The largest {@code journalSeq} THIS member's archive holds in its order-journal recordings of one genesis: the
  * {@code localOrderJournalDurableSeq} of the restore-side rule. The money journal tail reader's algorithm
- * ({@link MoneyJournalTail}: every recording on the stream, the last message of each through a bounded,
- * session-scoped replay, the maximum over them) with two changes: the frame bound is {@value #MAX_FRAME_LENGTH}, the
- * one aligned frame of this record, and a recording whose last message carries an epoch other than the expected
- * genesisId is ignored (counted as foreign), so a previous genesis left in the same archive can never make a restore
- * look safe. Never writes, never purges.
+ * ({@link MoneyJournalTail}: every recording on the stream, the last message of each through the kit's
+ * {@link RecordingTail}, which never asks the archive for a replay that starts inside a frame, the maximum over them)
+ * with two changes: a message counts when it is long enough to carry the epoch, and a recording whose last message
+ * carries an epoch other than the expected genesisId is ignored (counted as foreign), so a previous genesis left in
+ * the same archive can never make a restore look safe. Never writes, never purges. Every reader remembers nothing
+ * (its callers read once, at a restore), so each read replays up to one term of every recording, each replay held to
+ * the process's {@link TailReadBudget}.
  */
 public final class OrderJournalTail {
 
@@ -31,7 +31,7 @@ public final class OrderJournalTail {
     public static final int EPOCH_OFFSET = 16;
     /**
      * One journal message: header 8 + block 208 = 216 bytes, plus the 32-byte data header, aligned to 32: 256. A format
-     * constant tied to the codec; a larger message falls through to the whole-last-term read (correct, slower).
+     * constant tied to the codec (the retention profile reads it); the tail read does not depend on it.
      */
     public static final int MAX_FRAME_LENGTH = 256;
 
@@ -47,8 +47,14 @@ public final class OrderJournalTail {
     public record NoJournal(int recordings, int foreign) implements Result {
     }
 
-    /** Not readable now; the caller treats every SKIP as not skip-safe. */
-    public record Unknown(String reason) implements Result {
+    /**
+     * Not readable now; the caller treats every SKIP as not skip-safe. {@code deadline}: the read ran out of time (its
+     * own deadline, or waiting for the tail read budget), so a later read may get further.
+     */
+    public record Unknown(String reason, boolean deadline) implements Result {
+        public Unknown(final String reason) {
+            this(reason, false);
+        }
     }
 
     private record Rec(long id, long start, long stop, int termLength) {
@@ -61,13 +67,36 @@ public final class OrderJournalTail {
     private final int streamId;
     private final long expectedEpoch;
     private boolean epochFilterOff;
+    /** {journalSeq, epoch} of every message long enough to carry both; a shorter message does not count. */
+    private final RecordingTail<long[]> tail = new RecordingTail<>((buffer, offset, length, header) ->
+            length >= EPOCH_OFFSET + Long.BYTES
+                    ? new long[] {buffer.getLong(offset + JOURNAL_SEQ_OFFSET), buffer.getLong(offset + EPOCH_OFFSET)}
+                    : null);
 
+    private final TailReadBudget budget;
+    /** Recordings the last {@link #read} answered (their last message read), whether the read ended Known or not. */
+    private int answered;
+
+    /** A reader not held to a replay budget: for tests and tools. A member's readers pass its {@link TailReadBudget}. */
     public OrderJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock, final long expectedEpoch) {
-        this(aeron, archive, clock, "aeron:ipc", InfrastructureConstants.ORDER_JOURNAL_STREAM_ID, expectedEpoch);
+        this(aeron, archive, clock, expectedEpoch, TailReadBudget.unbounded());
+    }
+
+    /** @param budget the bytes this process's tail readers may replay per window ({@link MoneyJournalTail}'s rule) */
+    public OrderJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock, final long expectedEpoch,
+                            final TailReadBudget budget) {
+        this(aeron, archive, clock, "aeron:ipc", InfrastructureConstants.ORDER_JOURNAL_STREAM_ID, expectedEpoch, budget);
     }
 
     OrderJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock,
                      final String channelFragment, final int streamId, final long expectedEpoch) {
+        this(aeron, archive, clock, channelFragment, streamId, expectedEpoch, TailReadBudget.unbounded());
+    }
+
+    OrderJournalTail(final Aeron aeron, final AeronArchive archive, final NanoClock clock,
+                     final String channelFragment, final int streamId, final long expectedEpoch,
+                     final TailReadBudget budget) {
+        this.budget = Objects.requireNonNull(budget, "budget");
         this.aeron = Objects.requireNonNull(aeron, "aeron");
         this.archive = Objects.requireNonNull(archive, "archive");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -85,6 +114,7 @@ public final class OrderJournalTail {
     /** @param timeoutNs the whole read's budget ({@code SHADOW_LOAD_TIMEOUT_MS}) */
     public Result read(final long timeoutNs) {
         final long deadlineNs = clock.nanoTime() + timeoutNs;
+        answered = 0;
         final List<Rec> recs = new ArrayList<>();
         try {
             long from = 0;
@@ -135,8 +165,9 @@ public final class OrderJournalTail {
                 last = lastSeq(r, stop, deadlineNs);
             } catch (final RuntimeException readFailed) {
                 return new Unknown("last message of journal recording " + r.id() + " [" + r.start() + "," + stop
-                        + "): " + readFailed);
+                        + "): " + readFailed, TailReadBudget.isDeadline(readFailed));
             }
+            answered++;
             final long seq = last[0];
             if (seq == Long.MIN_VALUE) {
                 return new Unknown("no journal message in the last term of recording " + r.id() + " [" + r.start()
@@ -156,49 +187,38 @@ public final class OrderJournalTail {
     }
 
     /**
-     * {journalSeq, epoch} of the last message of {@code [r.start, stop)}; journalSeq {@code Long.MIN_VALUE} when there
-     * is none.
+     * {journalSeq, epoch} of the last message of {@code [max(r.start, base of the term holding stop - 1), stop)};
+     * journalSeq {@code Long.MIN_VALUE} when that range holds none.
      */
     private long[] lastSeq(final Rec r, final long stop, final long deadlineNs) {
-        final ShadowReplay replay = new ShadowReplay(aeron, archive, clock);
-        // every record is one 256-byte frame, so the widest window is tried first: one replay per recording normally
-        for (int w = MAX_FRAME_LENGTH; w >= FrameDescriptor.FRAME_ALIGNMENT; w -= FrameDescriptor.FRAME_ALIGNMENT) {
-            final long from = stop - w;
-            if (from < r.start()) {
-                continue;
-            }
-            final long[] seq = {Long.MIN_VALUE, 0L};
-            final int[] messages = {0};
-            final int[] frameLength = {0};
-            try {
-                replay.readRange(r.id(), from, w, (buffer, offset, length, header) -> {
-                    messages[0]++;
-                    frameLength[0] = header.frameLength();
-                    if (length >= EPOCH_OFFSET + Long.BYTES) {
-                        seq[0] = buffer.getLong(offset + JOURNAL_SEQ_OFFSET);
-                        seq[1] = buffer.getLong(offset + EPOCH_OFFSET);
-                    }
-                }, deadlineNs);
-            } catch (final ArchiveException notAFrame) {
-                if (notAFrame.errorCode() == ArchiveException.INVALID_POSITION) {
-                    continue; // not a frame header: a longer window
-                }
-                throw notAFrame;
-            }
-            if (messages[0] == 1 && BitUtil.align(frameLength[0], FrameDescriptor.FRAME_ALIGNMENT) == w
-                    && seq[0] != Long.MIN_VALUE) {
-                return seq;
-            }
+        final long want = TailReadBudget.estimate(r.start(), stop, r.termLength(), tail.resumePosition(r.id()));
+        budget.acquireOrThrow(want, deadlineNs);
+        if (want > 0 && clock.nanoTime() - deadlineNs >= 0) {
+            // the room came at the deadline: no replay is started past it (an end that did not move replays nothing)
+            budget.settle(want, 0);
+            throw new TailReadBudget.DeadlineException("deadline reached as the tail read budget made room ("
+                    + budget + ")");
         }
-        // the end is not one message frame (padding at a term end): read the term holding the end, frame aligned
-        final long termStart = Math.max(r.start(), (stop - 1) & ~((long)r.termLength() - 1));
-        final long[] seq = {Long.MIN_VALUE, 0L};
-        replay.readRange(r.id(), termStart, stop - termStart, (buffer, offset, length, header) -> {
-            if (length >= EPOCH_OFFSET + Long.BYTES) {
-                seq[0] = buffer.getLong(offset + JOURNAL_SEQ_OFFSET);
-                seq[1] = buffer.getLong(offset + EPOCH_OFFSET);
-            }
-        }, deadlineNs);
-        return seq;
+        final long before = tail.replayBytes();
+        try {
+            final long[] last = tail.last(new ShadowReplay(aeron, archive, clock), r.id(), r.start(), stop,
+                    r.termLength(), deadlineNs);
+            return last == null ? new long[] {Long.MIN_VALUE, 0L} : last;
+        } finally {
+            budget.settle(want, tail.replayBytes() - before);
+        }
+    }
+
+    /** The bytes this reader asked the archive to replay, over all its reads. */
+    public long replayBytes() {
+        return tail.replayBytes();
+    }
+
+    /**
+     * The recordings the last {@link #read} got an answer for before it ended: a read that ran out of time answered
+     * the ones before the one it stopped in.
+     */
+    public int answered() {
+        return answered;
     }
 }

@@ -225,6 +225,9 @@ public final class StubModeBootGuard {
         for (final String line : settings.criticalLines()) {
             System.err.println("[BOOT-GUARD] CRITICAL: " + line);
         }
+        for (final String line : settings.warningLines()) {
+            System.out.println("[BOOT-GUARD] WARNING: " + line);
+        }
         System.out.println("[BOOT-GUARD] snapshotMode=" + settings.mode().text() + " prune=" + pruneEnabled
                 + " floor=" + (settings.mode() == SnapshotMode.SHADOW && pruneEnabled
                 ? (settings.floorEnabled() ? "wired" : "UNCHECKED-OFF") : "not-needed") + " " + settings);

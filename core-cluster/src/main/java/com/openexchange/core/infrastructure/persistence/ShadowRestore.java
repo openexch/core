@@ -298,10 +298,37 @@ final class ShadowRestore {
 
     private OrderJournalRestoreRule orderJournalRule() {
         if (orderJournalRule == null) {
-            orderJournalRule = new OrderJournalRestoreRule(clock, settings.loadTimeoutMs(), OrderJournalRestoreRule.Holes.NONE);
+            orderJournalRule = new OrderJournalRestoreRule(clock, settings.loadTimeoutMs(), tailReadBudget(),
+                    OrderJournalRestoreRule.Holes.NONE);
         }
         return orderJournalRule;
     }
+
+    /** The member's one tail read budget; its own from the settings when the service did not wire one. */
+    private com.openexchange.core.infrastructure.journal.TailReadBudget tailReadBudget;
+
+    /** Wire the member's one tail read budget (shared with the housekeeping and the order journal rule). */
+    ShadowRestore tailReadBudget(final com.openexchange.core.infrastructure.journal.TailReadBudget budget) {
+        this.tailReadBudget = Objects.requireNonNull(budget, "budget");
+        return this;
+    }
+
+    private com.openexchange.core.infrastructure.journal.TailReadBudget tailReadBudget() {
+        if (tailReadBudget == null) {
+            tailReadBudget = settings.newTailReadBudget();
+        }
+        return tailReadBudget;
+    }
+
+    /**
+     * What this restore's money journal tail reads delivered so far, by recording: one per boot, so a read that ran
+     * out of time is resumed by the next one (in this call, or at the second read after a pull) instead of starting
+     * over, and a restore reaches what the housekeeping's periodic reads reach over several periods.
+     */
+    private final com.openexchange.cluster.journal.RecordingTail<Long> moneyJournalTail = MoneyJournalTail.newTail();
+    /** The end of {@code JOURNAL_TAIL_RESTORE_BUDGET_MS}, set at this restore's first money journal tail read. */
+    private long journalTailBudgetEndNs;
+    private boolean journalTailBudgetStarted;
 
     private boolean restoreAttempted;
     /** True while the SKIP the order journal refused is taken because no other path replays the log. */
@@ -692,9 +719,47 @@ final class ShadowRestore {
         return localJournal instanceof MoneyJournalTail.Known k && k.seq() >= h.journalSeq();
     }
 
-    private MoneyJournalTail.Result readJournalTail(final Aeron aeron, final AeronArchive archive) {
-        final MoneyJournalTail.Result r = new MoneyJournalTail(aeron, archive, clock)
-                .read(TimeUnit.MILLISECONDS.toNanos(settings.loadTimeoutMs()));
+    /**
+     * The local money journal's tail, through this restore's one {@link #moneyJournalTail}. Each attempt is bounded by
+     * {@code SHADOW_LOAD_TIMEOUT_MS} and its replays by the member's tail read budget. An attempt that ran out of time
+     * after it answered more recordings than the one before is run again, resuming where it stopped, while
+     * {@code JOURNAL_TAIL_RESTORE_BUDGET_MS} (counted from this restore's first read) lasts; the first attempt of every
+     * call always gets the whole {@code SHADOW_LOAD_TIMEOUT_MS}. The duration goes to {@code core_journal_tail_read_ms}
+     * and to the line printed here.
+     */
+    MoneyJournalTail.Result readJournalTail(final Aeron aeron, final AeronArchive archive) {
+        final long t0 = clock.nanoTime();
+        if (!journalTailBudgetStarted) {
+            journalTailBudgetStarted = true;
+            journalTailBudgetEndNs = t0 + TimeUnit.MILLISECONDS.toNanos(settings.journalTailRestoreBudgetMs());
+        }
+        final long attemptNs = TimeUnit.MILLISECONDS.toNanos(settings.loadTimeoutMs());
+        final long bytes0 = moneyJournalTail.replayBytes();
+        int attempts = 0;
+        int answeredBefore = -1;
+        MoneyJournalTail.Result r;
+        while (true) {
+            final long left = journalTailBudgetEndNs - clock.nanoTime();
+            final MoneyJournalTail reader = new MoneyJournalTail(aeron, archive, clock, moneyJournalTail,
+                    tailReadBudget());
+            r = reader.read(attempts == 0 ? attemptNs : Math.min(attemptNs, left));
+            attempts++;
+            final boolean progressed = reader.answered() > answeredBefore;
+            answeredBefore = reader.answered();
+            if (!(r instanceof MoneyJournalTail.Unknown u) || !u.deadline() || !progressed
+                    || journalTailBudgetEndNs - clock.nanoTime() <= 0) {
+                break;
+            }
+            counters.increment(SnapshotModeCounters.C.JOURNAL_TAIL_READ_RETRIES_TOTAL);
+            System.out.println("[shadow restore] money journal tail read " + attempts + " ran out of time after "
+                    + reader.answered() + " recording(s): reading again, resuming where it stopped ("
+                    + SnapshotModeSettings.Key.JOURNAL_TAIL_RESTORE_BUDGET_MS + " left "
+                    + TimeUnit.NANOSECONDS.toMillis(Math.max(0, journalTailBudgetEndNs - clock.nanoTime())) + " ms)");
+        }
+        final long ms = TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - t0);
+        counters.set(SnapshotModeCounters.C.JOURNAL_TAIL_READ_MS, ms);
+        System.out.println("[shadow restore] money journal tail " + r + " read_ms=" + ms + " attempts=" + attempts
+                + " replayed_bytes=" + (moneyJournalTail.replayBytes() - bytes0));
         publishJournalTail(r, counters);
         return r;
     }

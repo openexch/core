@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -75,6 +76,8 @@ public class NodeMetricsClusterTest {
                 .startupCanvassTimeoutNs(TimeUnit.SECONDS.toNanos(2))
                 .terminationTimeoutNs(TimeUnit.SECONDS.toNanos(2));
 
+        // sampler threads that exist before this member starts (one leaked by an earlier test in this JVM) do not count
+        final java.util.Set<Thread> samplersBefore = samplerThreads();
         ClusteredMediaDriver mediaDriver = null;
         ClusteredServiceContainer container = null;
         AeronCluster client = null;
@@ -135,6 +138,63 @@ public class NodeMetricsClusterTest {
                     + " us, mean " + doubleValue(body, "core_apply_dispatch_seconds_sum")
                     / value(body, "core_apply_dispatch_seconds_count") * 1e6 + " us over "
                     + value(body, "core_apply_dispatch_seconds_count") + " messages (dev box, SHARED driver)");
+
+            // Aeron's duty-cycle and snapshot-duration counters of this member (embedded driver), sampled by the
+            // kit's own thread once a second: wait for its first samples, then every family is in the body
+            final String[] stall = {"core_consensus_module_max_cycle_time_seconds",
+                "core_consensus_module_max_cycle_time_recent_seconds",
+                "core_consensus_module_max_cycle_time_last_rise_age_seconds",
+                "core_consensus_module_cycle_time_exceeded_total", "core_consensus_module_cycle_time_exceeded_recent",
+                "core_consensus_module_cycle_time_exceeded_last_age_seconds",
+                "core_service_max_cycle_time_seconds", "core_service_cycle_time_exceeded_total",
+                "core_snapshot_total_max_duration_seconds", "core_snapshot_total_duration_exceeded_total",
+                "core_snapshot_service_max_duration_seconds", "core_snapshot_service_duration_exceeded_total",
+                "core_driver_conductor_max_cycle_time_seconds", "core_driver_conductor_cycle_time_exceeded_total",
+                "core_driver_sender_max_cycle_time_seconds", "core_driver_receiver_max_cycle_time_seconds"};
+            String stallBody = body;
+            final long stallDeadline = System.currentTimeMillis() + 20_000;
+            while (true) {
+                final String scraped = stallBody;
+                // the first sample is taken as the member starts, before a cycle was timed: wait for a later one
+                if (java.util.Arrays.stream(stall).allMatch(name -> scraped.contains("\n" + name + " "))
+                        && scraped.contains("\ncore_archive_max_cycle_time_seconds{archive_id=")
+                        && doubleValue(scraped, "core_consensus_module_max_cycle_time_seconds") > 0
+                        && doubleValue(scraped, "core_service_max_cycle_time_seconds") > 0) {
+                    break;
+                }
+                assertTrue("the duty-cycle series did not appear with a timed cycle within 20s:\n" + scraped,
+                        System.currentTimeMillis() < stallDeadline);
+                Thread.sleep(250);
+                stallBody = HttpClient.newHttpClient().send(
+                        HttpRequest.newBuilder(URI.create("http://localhost:" + NODE_PORT + "/metrics")).GET().build(),
+                        HttpResponse.BodyHandlers.ofString()).body();
+            }
+            final long samplerAge = value(stallBody, "core_stall_sampler_age_seconds");
+            assertTrue("the sampler runs: " + samplerAge, samplerAge >= 0 && samplerAge <= 5);
+            assertTrue(stallBody, doubleValue(stallBody, "core_consensus_module_max_cycle_time_recent_seconds") > 0);
+            assertTrue(stallBody, stallBody.contains("# TYPE core_consensus_module_cycle_time_exceeded_total counter"));
+            assertTrue(stallBody, stallBody.contains("# TYPE core_consensus_module_max_cycle_time_seconds gauge"));
+            assertTrue(stallBody, stallBody.lines().anyMatch(
+                    l -> l.startsWith("core_archive_max_cycle_time_seconds{archive_id=")
+                            && l.contains(",agent=\"conductor\"} ")));
+            // every series of the body still has one head: the kit's block repeats no family of the registry
+            final java.util.Set<String> typed = new java.util.HashSet<>();
+            for (final String line : stallBody.split("\n")) {
+                if (line.startsWith("# TYPE ")) {
+                    assertTrue("a family declared twice: " + line, typed.add(line.split(" ")[2]));
+                }
+            }
+            final java.util.Set<Thread> started = samplerThreads();
+            started.removeAll(samplersBefore);
+            assertEquals("this member started one sampler thread of its own: " + started, 1, started.size());
+            final Thread sampler = started.iterator().next();
+            // and its member's stop stops it
+            CloseHelper.quietClose(client);
+            client = null;
+            CloseHelper.quietClose(container);
+            container = null;
+            sampler.join(10_000);
+            assertFalse("the member's stop stops its sampler thread", sampler.isAlive());
         } finally {
             CloseHelper.quietClose(client);
             CloseHelper.quietClose(container);
@@ -143,6 +203,17 @@ public class NodeMetricsClusterTest {
             System.clearProperty("core.node.port");
             System.clearProperty("snapshot.interval.minutes");
         }
+    }
+
+    /** The live threads named as the kit names the duty-cycle sampler's thread. */
+    private static java.util.Set<Thread> samplerThreads() {
+        final java.util.Set<Thread> out = new java.util.HashSet<>();
+        for (final Thread t : Thread.getAllStackTraces().keySet()) {
+            if (t.getName().equals("stall-metrics-sampler") && t.isAlive()) {
+                out.add(t);
+            }
+        }
+        return out;
     }
 
     private static long value(final String body, final String series) {

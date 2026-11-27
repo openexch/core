@@ -56,7 +56,9 @@ public final class AeronCluster {
      * running.
      */
     public AeronCluster() {
-        final EngineLifecycle lifecycle = EngineLifecycle.install("Core node", msg -> log.error("%s", msg));
+        // A fault goes to the log at ERROR; that a watchdog was armed, and with which bounds, is information.
+        final EngineLifecycle lifecycle = EngineLifecycle.install("Core node", msg -> log.error("%s", msg),
+                msg -> log.info("%s", msg));
         try {
             run(lifecycle);
         } catch (final Throwable t) {

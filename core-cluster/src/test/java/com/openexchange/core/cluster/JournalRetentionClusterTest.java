@@ -191,8 +191,9 @@ public class JournalRetentionClusterTest {
 
             final Reader live = s.new Reader(order(), "oe-projector");
             final Reader dead = s.new Reader(order(), "audit");
-            s.setAll(order(), "oe-projector", 0);
+            // the holding reader first: a pass between the two files then never sees the live reader alone
             s.setAll(order(), "audit", 0);
+            s.setAll(order(), "oe-projector", 0);
             dead.frozen = true; // registered, then it never applies anything
             final Pusher pusher = s.new Pusher(live, null);
             s.orders(4_500);

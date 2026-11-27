@@ -96,6 +96,13 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
 
     private volatile MoneyJournalTail.Result journal = new MoneyJournalTail.Unknown("not read yet");
     private long lastJournalReadNs = NEVER;
+    /**
+     * What the periodic journal tail reads delivered so far, by recording: a later read replays only what was recorded
+     * since. Touched only inside {@link #run} (the pruner thread, under {@link #lock}).
+     */
+    private final com.openexchange.cluster.journal.RecordingTail<Long> journalTail = MoneyJournalTail.newTail();
+    /** The member's one tail read budget ({@link #tailReadBudget(TailReadBudget)}); its own from the settings if unset. */
+    private volatile com.openexchange.core.infrastructure.journal.TailReadBudget tailReadBudget;
     private AeronArchive archive;
     private ShadowRetention retention;
     private ShadowHousekeeping housekeeping;
@@ -211,6 +218,21 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
     MemberShadowHousekeeping leaderArchiveEndpoint(final java.util.function.Supplier<String> endpoint) {
         this.leaderArchiveEndpoint = Objects.requireNonNull(endpoint, "endpoint");
         return this;
+    }
+
+    /** The member's one tail read budget, shared with the restore's reads (the service wires it). */
+    MemberShadowHousekeeping tailReadBudget(final com.openexchange.core.infrastructure.journal.TailReadBudget budget) {
+        this.tailReadBudget = Objects.requireNonNull(budget, "budget");
+        return this;
+    }
+
+    private com.openexchange.core.infrastructure.journal.TailReadBudget tailReadBudget() {
+        com.openexchange.core.infrastructure.journal.TailReadBudget b = tailReadBudget;
+        if (b == null) {
+            b = settings.newTailReadBudget();
+            tailReadBudget = b;
+        }
+        return b;
     }
 
     /** The armed writer, its thread and image buffer; null until armed. Read by the service thread. */
@@ -443,8 +465,9 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
     /**
      * The housekeeping's refresh step (9.3 (3)): the journal tail is read only when the floor will consult
      * {@code skipSafe}, that is the newest group is a STUB and a VERIFIED journal-enabled shadow sits above P_cm, and
-     * then at most once per {@code SHADOW_SCAN_PERIOD_MS} (up to five replay sessions per journal
-     * recording per read, the tmpfs churn paces). Otherwise the floor answers before any {@code skipSafe} (FULL
+     * then at most once per {@code SHADOW_SCAN_PERIOD_MS} (one replay session per journal recording whose end moved
+     * since the last read, of the bytes recorded since; the first read of a recording replays up to one term).
+     * Otherwise the floor answers before any {@code skipSafe} (FULL
      * -> P_cm, no shadow above P_cm -> the table never asks), and nothing is replayed. A stale tail is a lower bound
      * of the durable seq (it only grows), so it can refuse a safe SKIP candidate for one period, never accept an
      * unsafe one.
@@ -469,8 +492,11 @@ final class MemberShadowHousekeeping implements Runnable, AutoCloseable {
         }
         lastJournalReadNs = now;
         snapshotModeCounters.increment(SnapshotModeCounters.C.JOURNAL_TAIL_READS_TOTAL);
-        final MoneyJournalTail.Result r = new MoneyJournalTail(archive.context().aeron(), archive, clock)
-                .read(TimeUnit.MILLISECONDS.toNanos(settings.loadTimeoutMs()));
+        final long t0 = clock.nanoTime();
+        final MoneyJournalTail.Result r = new MoneyJournalTail(archive.context().aeron(), archive, clock, journalTail,
+                tailReadBudget()).read(TimeUnit.MILLISECONDS.toNanos(settings.loadTimeoutMs()));
+        snapshotModeCounters.set(SnapshotModeCounters.C.JOURNAL_TAIL_READ_MS,
+                TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - t0));
         journal = r;
         ShadowRestore.publishJournalTail(r, snapshotModeCounters);
     }
